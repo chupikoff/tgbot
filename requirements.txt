@@ -5,3 +5,4 @@ sqlalchemy==2.0.31
 redis==5.0.7
 psutil==6.0.0
 transmission-rpc==7.0.3
+docker==7.1.0

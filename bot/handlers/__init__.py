@@ -7,6 +7,7 @@ from .torrents import router as torrents_router
 from .backup import router as backup_router
 from .media import router as media_router
 from .services import router as services_router
+from .docker_containers import router as docker_router
 
 router = Router()
 router.include_router(start_router)
@@ -17,3 +18,4 @@ router.include_router(torrents_router)
 router.include_router(backup_router)
 router.include_router(media_router)
 router.include_router(services_router)
+router.include_router(docker_router)
