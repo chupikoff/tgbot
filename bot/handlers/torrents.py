@@ -25,6 +25,7 @@ def torrent_menu() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="📋 Список торрентов", callback_data="torrent_list")],
         [InlineKeyboardButton(text="🔗 Добавить по ссылке", callback_data="torrent_add_url")],
         [InlineKeyboardButton(text="📁 Добавить файл", callback_data="torrent_add_file")],
+        [InlineKeyboardButton(text="◀️ Главное меню", callback_data="menu_main")],
     ])
 
 def back_button(callback: str) -> InlineKeyboardMarkup:
@@ -53,14 +54,9 @@ async def cb_torrent_list(callback: CallbackQuery, user: User):
             reply_markup=back_button("torrent_main")
         )
         return
-
     if not torrents:
-        await callback.message.edit_text(
-            "📋 Торрентов нет.",
-            reply_markup=back_button("torrent_main")
-        )
+        await callback.message.edit_text("📋 Торрентов нет.", reply_markup=back_button("torrent_main"))
         return
-
     buttons = []
     for t in torrents:
         progress = f"{t['progress']}%"
@@ -68,12 +64,8 @@ async def cb_torrent_list(callback: CallbackQuery, user: User):
             text=f"{progress} | {t['name'][:35]}",
             callback_data=f"torrent_view_{t['id']}"
         )])
-
     buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="torrent_main")])
-    await callback.message.edit_text(
-        "📋 Список торрентов:",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
-    )
+    await callback.message.edit_text("📋 Список торрентов:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
 
 @router.callback_query(F.data.startswith("torrent_view_"))
 async def cb_torrent_view(callback: CallbackQuery, user: User):
@@ -83,11 +75,9 @@ async def cb_torrent_view(callback: CallbackQuery, user: User):
     except Exception:
         await callback.answer("❌ Ошибка подключения к Transmission.")
         return
-
     if not t:
         await callback.answer("❌ Торрент не найден.")
         return
-
     status = STATUS_NAMES.get(t["status"], t["status"])
     text = (
         f"🌊 {t['name']}\n\n"
@@ -97,29 +87,17 @@ async def cb_torrent_view(callback: CallbackQuery, user: User):
         f"⬇️ {t['speed_down']} KB/s | ⬆️ {t['speed_up']} KB/s\n"
         f"⏱ ETA: {t['eta']}"
     )
-
     buttons = []
     if t["status"] == "stopped":
-        buttons.append([InlineKeyboardButton(
-            text="▶️ Возобновить",
-            callback_data=f"torrent_resume_{torrent_id}"
-        )])
+        buttons.append([InlineKeyboardButton(text="▶️ Возобновить", callback_data=f"torrent_resume_{torrent_id}")])
     else:
-        buttons.append([InlineKeyboardButton(
-            text="⏸ Пауза",
-            callback_data=f"torrent_pause_{torrent_id}"
-        )])
-
+        buttons.append([InlineKeyboardButton(text="⏸ Пауза", callback_data=f"torrent_pause_{torrent_id}")])
     buttons.append([
         InlineKeyboardButton(text="🗑 Удалить", callback_data=f"torrent_delete_{torrent_id}"),
         InlineKeyboardButton(text="🗑+файлы", callback_data=f"torrent_deletef_{torrent_id}"),
     ])
     buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="torrent_list")])
-
-    await callback.message.edit_text(
-        text,
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
-    )
+    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
 
 @router.callback_query(F.data.startswith("torrent_pause_"))
 async def cb_torrent_pause(callback: CallbackQuery, user: User):
@@ -183,11 +161,9 @@ async def cb_add_url(callback: CallbackQuery, state: FSMContext):
 async def process_torrent_url(message: Message, state: FSMContext, user: User):
     await state.clear()
     url = message.text.strip()
-
     if not url.startswith("magnet:") and not url.startswith("http"):
         await message.answer("❌ Неверный формат. Отправь magnet-ссылку или http ссылку.")
         return
-
     try:
         torrent = add_torrent_by_url(url)
         await message.answer(
@@ -209,15 +185,12 @@ async def cb_add_file(callback: CallbackQuery, state: FSMContext):
 @router.message(TorrentStates.waiting_file)
 async def process_torrent_file(message: Message, state: FSMContext, user: User):
     await state.clear()
-
     if not message.document:
         await message.answer("❌ Отправь файл с расширением .torrent")
         return
-
     if not message.document.file_name.endswith(".torrent"):
         await message.answer("❌ Файл должен иметь расширение .torrent")
         return
-
     try:
         file = await message.bot.get_file(message.document.file_id)
         downloaded = await message.bot.download_file(file.file_path)

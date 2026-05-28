@@ -1,4 +1,3 @@
-
 import asyncio
 from aiogram import Router, F
 from aiogram.filters import Command
@@ -18,6 +17,7 @@ def backup_menu() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="⚙️ Бэкап конфигов", callback_data="backup_configs")],
         [InlineKeyboardButton(text="🔄 Полный бэкап", callback_data="backup_full")],
         [InlineKeyboardButton(text="📋 Список бэкапов", callback_data="backup_list")],
+        [InlineKeyboardButton(text="◀️ Главное меню", callback_data="menu_main")],
     ])
 
 def back_button(callback: str) -> InlineKeyboardMarkup:
@@ -50,10 +50,7 @@ async def cb_backup_db(callback: CallbackQuery, user: User):
             )
         )
         file = FSInputFile(filename)
-        await callback.message.answer_document(
-            file,
-            caption="✅ Бэкап базы данных готов!"
-        )
+        await callback.message.answer_document(file, caption="✅ Бэкап базы данных готов!")
         await callback.message.edit_text("💾 Меню бэкапов:", reply_markup=backup_menu())
         delete_old_backups()
     except Exception as e:
@@ -69,10 +66,7 @@ async def cb_backup_configs(callback: CallbackQuery, user: User):
         loop = asyncio.get_event_loop()
         filename = await loop.run_in_executor(None, backup_configs)
         file = FSInputFile(filename)
-        await callback.message.answer_document(
-            file,
-            caption="✅ Бэкап конфигов готов!"
-        )
+        await callback.message.answer_document(file, caption="✅ Бэкап конфигов готов!")
         await callback.message.edit_text("💾 Меню бэкапов:", reply_markup=backup_menu())
         delete_old_backups()
     except Exception as e:
@@ -95,14 +89,12 @@ async def cb_backup_full(callback: CallbackQuery, user: User):
             )
         )
         configs_file = await loop.run_in_executor(None, backup_configs)
-
         for filename, caption in [
             (db_file, "🗄 База данных"),
             (configs_file, "⚙️ Конфиги"),
         ]:
             file = FSInputFile(filename)
             await callback.message.answer_document(file, caption=f"✅ {caption}")
-
         await callback.message.edit_text("💾 Меню бэкапов:", reply_markup=backup_menu())
         delete_old_backups()
     except Exception as e:
@@ -114,20 +106,14 @@ async def cb_backup_full(callback: CallbackQuery, user: User):
 @router.callback_query(F.data == "backup_list")
 async def cb_backup_list(callback: CallbackQuery, user: User):
     backups = get_backups()
-
     if not backups:
         await callback.message.edit_text(
             "📋 Бэкапов пока нет.",
             reply_markup=back_button("backup_main")
         )
         return
-
     text = "📋 Последние бэкапы:\n\n"
     for b in backups[:10]:
         text += f"📦 {b['name']}\n"
         text += f"   📅 {b['created']} | 💾 {b['size']} KB\n\n"
-
-    await callback.message.edit_text(
-        text,
-        reply_markup=back_button("backup_main")
-    )
+    await callback.message.edit_text(text, reply_markup=back_button("backup_main"))
