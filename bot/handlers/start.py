@@ -1,6 +1,7 @@
 from aiogram import Router, F
 from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from sqlalchemy.ext.asyncio import AsyncSession
 from models.user import User
 
 router = Router()
@@ -18,6 +19,7 @@ def main_menu(user: User) -> InlineKeyboardMarkup:
     if user.role in ["owner", "admin", "user"]:
         buttons.append([InlineKeyboardButton(text="📒 Заметки", callback_data="menu_notes")])
         buttons.append([InlineKeyboardButton(text="🎬 Медиатека", callback_data="menu_media")])
+        buttons.append([InlineKeyboardButton(text="🌌 Космос", callback_data="menu_game")])
 
     if user.role in ["admin", "owner"]:
         buttons.append([InlineKeyboardButton(text="🖥 Состояние сервера", callback_data="menu_status")])
@@ -82,6 +84,16 @@ async def cb_menu_media(callback: CallbackQuery, user: User):
     from handlers.media import media_menu
     await callback.message.edit_text("🎬 Медиатека:", reply_markup=media_menu())
 
+@router.callback_query(F.data == "menu_game")
+async def cb_menu_game(callback: CallbackQuery, user: User, session: AsyncSession):
+    from handlers.game import game_main_menu, format_player_status
+    from services.game_service import get_or_create_player
+    player = await get_or_create_player(session, user.telegram_id)
+    await callback.message.edit_text(
+        f"🌌 Добро пожаловать в космос, пилот!\n\n{format_player_status(player)}",
+        reply_markup=game_main_menu(player)
+    )
+
 @router.callback_query(F.data == "menu_status")
 async def cb_menu_status(callback: CallbackQuery, user: User):
     from services.monitoring import format_status_message
@@ -116,7 +128,7 @@ async def cb_menu_users(callback: CallbackQuery, user: User):
     await callback.message.edit_text("👥 Управление пользователями:", reply_markup=users_menu(user))
 
 @router.callback_query(F.data == "users_list")
-async def cb_users_list(callback: CallbackQuery, user: User, session):
+async def cb_users_list(callback: CallbackQuery, user: User, session: AsyncSession):
     from services.user_service import get_all_users
     from handlers.admin import ROLE_NAMES as ADMIN_ROLE_NAMES
     users = await get_all_users(session)
