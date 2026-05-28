@@ -11,6 +11,8 @@ class Settings(BaseSettings):
     TRANSMISSION_USER: str = ""
     TRANSMISSION_PASSWORD: str = ""
     DOWNLOAD_DIR: str = "/home/chpk/media"
+    SERVICE_API_TOKEN: str = ""
+    SERVICE_API_URL: str = "http://192.168.88.2:7777"
 
     @property
     def database_url(self):

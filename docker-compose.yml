@@ -3,6 +3,7 @@ services:
     build: .
     restart: unless-stopped
     env_file: .env
+    privileged: true
     volumes:
       - /home/chpk/backups:/home/chpk/backups
       - /home/chpk/tgbot/.env:/home/chpk/tgbot/.env:ro
@@ -10,6 +11,9 @@ services:
       - /etc/transmission-daemon/settings.json:/etc/transmission-daemon/settings.json:ro
       - /etc/samba/smb.conf:/etc/samba/smb.conf:ro
       - /etc/minidlna.conf:/etc/minidlna.conf:ro
+      - /var/run/dbus:/var/run/dbus
+      - /run/systemd/private:/run/systemd/private
+      - /run/systemd/system:/run/systemd/system
     depends_on:
       postgres:
         condition: service_healthy

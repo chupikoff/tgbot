@@ -21,6 +21,7 @@ def main_menu(user: User) -> InlineKeyboardMarkup:
 
     if user.role in ["admin", "owner"]:
         buttons.append([InlineKeyboardButton(text="🖥 Состояние сервера", callback_data="menu_status")])
+        buttons.append([InlineKeyboardButton(text="⚙️ Сервисы", callback_data="menu_services")])
         buttons.append([InlineKeyboardButton(text="🌊 Торренты", callback_data="menu_torrents")])
         buttons.append([InlineKeyboardButton(text="👥 Пользователи", callback_data="menu_users")])
 
@@ -85,6 +86,11 @@ async def cb_menu_status(callback: CallbackQuery, user: User):
     from services.monitoring import format_status_message
     status = format_status_message()
     await callback.message.edit_text(status, reply_markup=back_to_main())
+
+@router.callback_query(F.data == "menu_services")
+async def cb_menu_services(callback: CallbackQuery, user: User):
+    from handlers.services import services_menu
+    await callback.message.edit_text("⚙️ Управление сервисами:", reply_markup=services_menu())
 
 @router.callback_query(F.data == "menu_torrents")
 async def cb_menu_torrents(callback: CallbackQuery, user: User):
