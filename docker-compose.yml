@@ -3,6 +3,13 @@ services:
     build: .
     restart: unless-stopped
     env_file: .env
+    volumes:
+      - /home/chpk/backups:/home/chpk/backups
+      - /home/chpk/tgbot/.env:/home/chpk/tgbot/.env:ro
+      - /home/chpk/tgbot/docker-compose.yml:/home/chpk/tgbot/docker-compose.yml:ro
+      - /etc/transmission-daemon/settings.json:/etc/transmission-daemon/settings.json:ro
+      - /etc/samba/smb.conf:/etc/samba/smb.conf:ro
+      - /etc/minidlna.conf:/etc/minidlna.conf:ro
     depends_on:
       postgres:
         condition: service_healthy

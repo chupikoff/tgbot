@@ -6,6 +6,7 @@ from config import settings
 from handlers import router
 from middlewares.auth import AuthMiddleware
 from db.database import init_db, async_session
+from workers.backup_worker import schedule_backups
 
 logging.basicConfig(level=logging.INFO)
 
@@ -20,6 +21,8 @@ async def main():
     dp.callback_query.middleware(AuthMiddleware(async_session))
 
     dp.include_router(router)
+
+    asyncio.create_task(schedule_backups(bot))
 
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
