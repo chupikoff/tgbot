@@ -3,7 +3,7 @@ from config import settings
 from models.user import Base
 from models.note import Category, Note
 from models.media import Media
-from models.game import GamePlayer, GameEvent
+from models.game import GamePlayer, GameEvent, GameImage
 
 engine = create_async_engine(settings.database_url, echo=False)
 async_session = async_sessionmaker(engine, expire_on_commit=False)

@@ -9,6 +9,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 router = Router()
 
+PAGE_SIZE = 7
+
 class MediaStates(StatesGroup):
     waiting_title = State()
     waiting_file = State()
@@ -22,7 +24,7 @@ def is_admin_or_above(user: User) -> bool:
 
 def media_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🎬 Список видео", callback_data="media_list")],
+        [InlineKeyboardButton(text="🎬 Список видео", callback_data="media_list_0")],
         [InlineKeyboardButton(text="🔍 Поиск", callback_data="media_search")],
         [InlineKeyboardButton(text="◀️ Главное меню", callback_data="menu_main")],
     ])
@@ -32,21 +34,38 @@ def back_button(callback: str) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="◀️ Назад", callback_data=callback)]
     ])
 
-async def show_media_list(target, user: User, session: AsyncSession):
+async def show_media_list(target, user: User, session: AsyncSession, page: int = 0):
     media_list = await get_all_media(session)
+    total = len(media_list)
+    start = page * PAGE_SIZE
+    end = start + PAGE_SIZE
+    page_items = media_list[start:end]
+    total_pages = (total + PAGE_SIZE - 1) // PAGE_SIZE
+
     buttons = []
-    if media_list:
-        for m in media_list:
-            icon = "🎬" if m.file_type == "video" else "📄"
-            buttons.append([InlineKeyboardButton(
-                text=f"{icon} {m.title}",
-                callback_data=f"media_view_{m.id}"
-            )])
+    for m in page_items:
+        icon = "🎬" if m.file_type == "video" else "📄"
+        buttons.append([InlineKeyboardButton(
+            text=f"{icon} {m.title}",
+            callback_data=f"media_view_{m.id}"
+        )])
+
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="◀️", callback_data=f"media_list_{page - 1}"))
+    if end < total:
+        nav.append(InlineKeyboardButton(text="▶️", callback_data=f"media_list_{page + 1}"))
+    if nav:
+        buttons.append(nav)
+
     if is_admin_or_above(user):
         buttons.append([InlineKeyboardButton(text="➕ Добавить видео", callback_data="media_add")])
     buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="media_main")])
-    text = f"🎬 Видео ({len(media_list)}):" if media_list else "🎬 Видео пока нет."
+
+    page_text = f" (стр. {page + 1}/{total_pages})" if total_pages > 1 else ""
+    text = f"🎬 Видео ({total}){page_text}:" if media_list else "🎬 Видео пока нет."
     markup = InlineKeyboardMarkup(inline_keyboard=buttons)
+
     if hasattr(target, "message"):
         try:
             await target.message.edit_text(text, reply_markup=markup)
@@ -69,9 +88,14 @@ async def cb_media_main(callback: CallbackQuery, user: User):
     except Exception:
         await callback.message.answer("🎬 Медиатека:", reply_markup=media_menu())
 
-@router.callback_query(F.data == "media_list")
+@router.callback_query(F.data.startswith("media_list_"))
 async def cb_media_list(callback: CallbackQuery, user: User, session: AsyncSession):
-    await show_media_list(callback, user, session)
+    page = int(callback.data.split("_")[2])
+    await show_media_list(callback, user, session, page)
+
+@router.callback_query(F.data == "media_list")
+async def cb_media_list_default(callback: CallbackQuery, user: User, session: AsyncSession):
+    await show_media_list(callback, user, session, 0)
 
 @router.callback_query(F.data.startswith("media_view_"))
 async def cb_media_view(callback: CallbackQuery, user: User, session: AsyncSession):
@@ -88,7 +112,7 @@ async def cb_media_view(callback: CallbackQuery, user: User, session: AsyncSessi
             text="🗑 Удалить",
             callback_data=f"media_delete_{media_id}"
         )])
-    buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="media_list")])
+    buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="media_list_0")])
 
     await callback.message.answer_video(
         media.file_id,
@@ -109,7 +133,7 @@ async def cb_media_delete(callback: CallbackQuery, user: User, session: AsyncSes
         await callback.message.delete()
         await callback.message.answer(
             "🗑 Видео удалено.",
-            reply_markup=back_button("media_list")
+            reply_markup=back_button("media_list_0")
         )
     else:
         await callback.answer("❌ Видео не найдено.")
@@ -122,12 +146,12 @@ async def cb_media_add(callback: CallbackQuery, state: FSMContext, user: User):
     try:
         await callback.message.edit_text(
             "🎬 Введи название видео:",
-            reply_markup=back_button("media_list")
+            reply_markup=back_button("media_list_0")
         )
     except Exception:
         await callback.message.answer(
             "🎬 Введи название видео:",
-            reply_markup=back_button("media_list")
+            reply_markup=back_button("media_list_0")
         )
     await state.set_state(MediaStates.waiting_title)
 
@@ -155,7 +179,7 @@ async def process_media_file(message: Message, state: FSMContext, user: User, se
     media = await add_media(session, data["title"], file_id, file_type, user.telegram_id)
     await message.answer(
         f"✅ Видео '{media.title}' добавлено в медиатеку!",
-        reply_markup=back_button("media_list")
+        reply_markup=back_button("media_list_0")
     )
 
 @router.callback_query(F.data == "media_search")

@@ -118,10 +118,17 @@ async def process_new_category(message: Message, state: FSMContext, user: User, 
     if title and content:
         note = await create_note(session, title, content, user.telegram_id, is_shared=is_shared, category_id=category.id)
         await state.clear()
-        await message.answer(f"✅ Заметка '{note.title}' создана в категории '{category.name}'!")
+        back = "notes_shared" if is_shared else "notes_my"
+        await message.answer(
+            f"✅ Заметка '{note.title}' создана в категории '{category.name}'!",
+            reply_markup=back_button(back)
+        )
     else:
         await state.clear()
-        await message.answer(f"✅ Категория '{category.name}' создана!")
+        await message.answer(
+            f"✅ Категория '{category.name}' создана!",
+            reply_markup=back_button("notes_categories")
+        )
 
 @router.callback_query(F.data.startswith("note_setcat_"))
 async def cb_set_category(callback: CallbackQuery, state: FSMContext, user: User, session: AsyncSession):
@@ -131,7 +138,11 @@ async def cb_set_category(callback: CallbackQuery, state: FSMContext, user: User
     category_id = cat_id if cat_id != 0 else None
     is_shared = data.get("is_shared", False)
     note = await create_note(session, data["title"], data["content"], user.telegram_id, is_shared=is_shared, category_id=category_id)
-    await callback.message.edit_text(f"✅ Заметка '{note.title}' создана!")
+    back = "notes_shared" if is_shared else "notes_my"
+    await callback.message.edit_text(
+        f"✅ Заметка '{note.title}' створена!",
+        reply_markup=back_button(back)
+    )
 
 @router.callback_query(F.data.startswith("note_view_"))
 async def cb_view_note(callback: CallbackQuery, user: User, session: AsyncSession):
@@ -183,7 +194,7 @@ async def cb_edit_note(callback: CallbackQuery, state: FSMContext, user: User, s
     if not note or (note.owner_id != user.telegram_id and user.role not in ["owner", "admin"]):
         await callback.answer("⛔ Нет доступа.")
         return
-    await state.update_data(note_id=note_id)
+    await state.update_data(note_id=note_id, is_shared=note.is_shared)
     await callback.message.edit_text(f"✏️ Редактирование: '{note.title}'\n\nВведи новый заголовок или /skip чтобы оставить прежний:")
     await state.set_state(NoteStates.editing_title)
 
@@ -200,8 +211,13 @@ async def process_edit_content(message: Message, state: FSMContext, session: Asy
     await state.clear()
     new_title = data.get("new_title")
     new_content = message.text if message.text != "/skip" else None
+    is_shared = data.get("is_shared", False)
     note = await update_note(session, data["note_id"], title=new_title, content=new_content)
-    await message.answer(f"✅ Заметка '{note.title}' обновлена!")
+    back = "notes_shared" if is_shared else "notes_my"
+    await message.answer(
+        f"✅ Заметка '{note.title}' обновлена!",
+        reply_markup=back_button(back)
+    )
 
 @router.callback_query(F.data == "notes_shared")
 async def cb_shared_notes(callback: CallbackQuery, user: User, session: AsyncSession):

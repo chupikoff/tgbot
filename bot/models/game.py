@@ -1,5 +1,5 @@
-from sqlalchemy import BigInteger, String, Integer, Float, DateTime, ForeignKey, Text, func, Boolean
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy import BigInteger, String, Integer, DateTime, Text, func
+from sqlalchemy.orm import Mapped, mapped_column
 from datetime import datetime
 from models.user import Base
 
@@ -19,6 +19,17 @@ class GamePlayer(Base):
     ship_name: Mapped[str] = mapped_column(String(64), default="Shuttle MK-1")
     location: Mapped[str] = mapped_column(String(64), default="K-9 Hub")
     total_jumps: Mapped[int] = mapped_column(Integer, default=0)
+    mined_location: Mapped[str | None] = mapped_column(String(64), nullable=True, default=None)
+    explored_location: Mapped[str | None] = mapped_column(String(64), nullable=True, default=None)
+
+    xp: Mapped[int] = mapped_column(Integer, default=0)
+    level: Mapped[int] = mapped_column(Integer, default=1)
+    skill_points: Mapped[int] = mapped_column(Integer, default=0)
+    skill_trade: Mapped[int] = mapped_column(Integer, default=0)
+    skill_engineer: Mapped[int] = mapped_column(Integer, default=0)
+    skill_mechanic: Mapped[int] = mapped_column(Integer, default=0)
+    skill_pilot: Mapped[int] = mapped_column(Integer, default=0)
+
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     last_seen: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
@@ -33,4 +44,13 @@ class GameEvent(Base):
     credits_delta: Mapped[int] = mapped_column(Integer, default=0)
     fuel_delta: Mapped[int] = mapped_column(Integer, default=0)
     hull_delta: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+class GameImage(Base):
+    __tablename__ = "game_images"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    key: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    file_id: Mapped[str] = mapped_column(String(256), nullable=False)
+    added_by: Mapped[int] = mapped_column(BigInteger, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())

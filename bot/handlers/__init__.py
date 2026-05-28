@@ -9,6 +9,8 @@ from .media import router as media_router
 from .services import router as services_router
 from .docker_containers import router as docker_router
 from .game import router as game_router
+from .game_images import router as game_images_router
+from .game_locations import router as game_locations_router
 
 router = Router()
 router.include_router(start_router)
@@ -21,3 +23,5 @@ router.include_router(media_router)
 router.include_router(services_router)
 router.include_router(docker_router)
 router.include_router(game_router)
+router.include_router(game_images_router)
+router.include_router(game_locations_router)

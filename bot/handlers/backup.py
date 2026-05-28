@@ -34,7 +34,10 @@ async def cmd_backup(message: Message, user: User):
 
 @router.callback_query(F.data == "backup_main")
 async def cb_backup_main(callback: CallbackQuery, user: User):
-    await callback.message.edit_text("💾 Меню бэкапов:", reply_markup=backup_menu())
+    try:
+        await callback.message.edit_text("💾 Меню бэкапов:", reply_markup=backup_menu())
+    except Exception:
+        await callback.message.answer("💾 Меню бэкапов:", reply_markup=backup_menu())
 
 @router.callback_query(F.data == "backup_db")
 async def cb_backup_db(callback: CallbackQuery, user: User):
@@ -50,8 +53,12 @@ async def cb_backup_db(callback: CallbackQuery, user: User):
             )
         )
         file = FSInputFile(filename)
-        await callback.message.answer_document(file, caption="✅ Бэкап базы данных готов!")
-        await callback.message.edit_text("💾 Меню бэкапов:", reply_markup=backup_menu())
+        await callback.message.delete()
+        await callback.message.answer_document(
+            file,
+            caption="✅ Бэкап базы данных готов!",
+            reply_markup=back_button("backup_main")
+        )
         delete_old_backups()
     except Exception as e:
         await callback.message.edit_text(
@@ -66,8 +73,12 @@ async def cb_backup_configs(callback: CallbackQuery, user: User):
         loop = asyncio.get_event_loop()
         filename = await loop.run_in_executor(None, backup_configs)
         file = FSInputFile(filename)
-        await callback.message.answer_document(file, caption="✅ Бэкап конфигов готов!")
-        await callback.message.edit_text("💾 Меню бэкапов:", reply_markup=backup_menu())
+        await callback.message.delete()
+        await callback.message.answer_document(
+            file,
+            caption="✅ Бэкап конфигов готов!",
+            reply_markup=back_button("backup_main")
+        )
         delete_old_backups()
     except Exception as e:
         await callback.message.edit_text(
@@ -89,13 +100,16 @@ async def cb_backup_full(callback: CallbackQuery, user: User):
             )
         )
         configs_file = await loop.run_in_executor(None, backup_configs)
-        for filename, caption in [
-            (db_file, "🗄 База данных"),
-            (configs_file, "⚙️ Конфиги"),
-        ]:
-            file = FSInputFile(filename)
-            await callback.message.answer_document(file, caption=f"✅ {caption}")
-        await callback.message.edit_text("💾 Меню бэкапов:", reply_markup=backup_menu())
+        await callback.message.delete()
+        await callback.message.answer_document(
+            FSInputFile(db_file),
+            caption="✅ База данных"
+        )
+        await callback.message.answer_document(
+            FSInputFile(configs_file),
+            caption="✅ Конфиги",
+            reply_markup=back_button("backup_main")
+        )
         delete_old_backups()
     except Exception as e:
         await callback.message.edit_text(
