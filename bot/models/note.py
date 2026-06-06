@@ -23,6 +23,7 @@ class Note(Base):
     owner_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     is_shared: Mapped[bool] = mapped_column(Boolean, default=False)
     category_id: Mapped[int | None] = mapped_column(ForeignKey("categories.id"), nullable=True)
+    image_file_id: Mapped[str | None] = mapped_column(String(256), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 

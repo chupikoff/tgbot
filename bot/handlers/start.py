@@ -1,6 +1,7 @@
 from aiogram import Router, F
 from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.fsm.context import FSMContext
 from sqlalchemy.ext.asyncio import AsyncSession
 from models.user import User
 
@@ -18,6 +19,7 @@ def main_menu(user: User) -> InlineKeyboardMarkup:
     if user.role in ["owner", "admin", "user"]:
         buttons.append([InlineKeyboardButton(text="📒 Заметки", callback_data="menu_notes")])
         buttons.append([InlineKeyboardButton(text="🎬 Медиатека", callback_data="menu_media")])
+        buttons.append([InlineKeyboardButton(text="🧟 Выжить", callback_data="menu_zs")])
     if user.role in ["admin", "owner"]:
         buttons.append([InlineKeyboardButton(text="🖥 Состояние сервера", callback_data="menu_status")])
         buttons.append([InlineKeyboardButton(text="⚙️ Сервисы", callback_data="menu_services")])
@@ -37,6 +39,16 @@ def back_button(callback: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="◀️ Назад", callback_data=callback)]
     ])
+
+def users_menu(user: User) -> InlineKeyboardMarkup:
+    buttons = []
+    buttons.append([InlineKeyboardButton(text="📋 Список пользователей", callback_data="users_list")])
+    if user.role == "owner":
+        buttons.append([InlineKeyboardButton(text="🎭 Управление ролями", callback_data="users_roles")])
+    buttons.append([InlineKeyboardButton(text="🚫 Заблокировать", callback_data="users_ban_list")])
+    buttons.append([InlineKeyboardButton(text="✅ Разблокировать", callback_data="users_unban_list")])
+    buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="menu_main")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 @router.message(Command("start"))
 async def cmd_start(message: Message, user: User):
@@ -74,11 +86,20 @@ async def cb_menu_media(callback: CallbackQuery, user: User):
     from handlers.media import media_menu
     await callback.message.edit_text("🎬 Медиатека:", reply_markup=media_menu())
 
+def status_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 Обновить", callback_data="menu_status")],
+        [InlineKeyboardButton(text="◀️ Главное меню", callback_data="menu_main")],
+    ])
+
 @router.callback_query(F.data == "menu_status")
 async def cb_menu_status(callback: CallbackQuery, user: User):
     from services.monitoring import format_status_message
     status = format_status_message()
-    await callback.message.edit_text(status, reply_markup=back_to_main())
+    try:
+        await callback.message.edit_text(status, reply_markup=status_menu())
+    except Exception:
+        await callback.message.answer(status, reply_markup=status_menu())
 
 @router.callback_query(F.data == "menu_services")
 async def cb_menu_services(callback: CallbackQuery, user: User):
@@ -100,10 +121,216 @@ async def cb_menu_backup(callback: CallbackQuery, user: User):
     from handlers.backup import backup_menu
     await callback.message.edit_text("💾 Меню бэкапов:", reply_markup=backup_menu())
 
+@router.callback_query(F.data == "menu_zs")
+async def cb_menu_zs(callback: CallbackQuery, user: User, session: AsyncSession, state: FSMContext):
+    from services.zs_service import get_player, get_base
+    from handlers.zs_game import format_status, main_menu, ZSStates
+    player = await get_player(session, user.telegram_id)
+    if not player:
+        await callback.message.edit_text(
+            "🧟 Добро пожаловать в зону заражения!\n\n"
+            "Учёные из Великой Крокожии работают над вакциной.\n"
+            "Твоя задача — выжить 30 дней.\n\n"
+            "Введи имя своего персонажа:"
+        )
+        await state.set_state(ZSStates.entering_name)
+        return
+    if not player.is_alive:
+        from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+        await callback.message.edit_text(
+            "💀 Твой персонаж погиб.\n\nХочешь начать заново?",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔄 Начать заново", callback_data="zs_restart")]
+            ])
+        )
+        return
+    base = await get_base(session, user.telegram_id)
+    text = format_status(player)
+    try:
+        await callback.message.edit_text(text, reply_markup=main_menu(player, base))
+    except Exception:
+        await callback.message.answer(text, reply_markup=main_menu(player, base))
+
 @router.callback_query(F.data == "menu_users")
 async def cb_menu_users(callback: CallbackQuery, user: User):
     if user.role not in ["admin", "owner"]:
         await callback.answer("⛔ Недостаточно прав.")
         return
-    from handlers.admin import users_menu
     await callback.message.edit_text("👥 Управление пользователями:", reply_markup=users_menu(user))
+
+@router.callback_query(F.data == "users_list")
+async def cb_users_list(callback: CallbackQuery, user: User, session: AsyncSession):
+    from services.user_service import get_all_users
+    users = await get_all_users(session)
+    if not users:
+        await callback.message.edit_text("Пользователей пока нет.", reply_markup=back_button("menu_users"))
+        return
+    text = "👥 Список пользователей:\n\n"
+    for u in users:
+        status = "✅" if u.is_active else "❌"
+        username = f"@{u.username}" if u.username else "не указан"
+        role_name = ROLE_NAMES.get(u.role, u.role)
+        text += f"{status} {u.full_name} ({username})\n"
+        text += f"   ID: {u.telegram_id} | Роль: {role_name}\n\n"
+    await callback.message.edit_text(text, reply_markup=back_button("menu_users"))
+
+@router.callback_query(F.data == "users_roles")
+async def cb_users_roles(callback: CallbackQuery, user: User, session: AsyncSession):
+    if user.role != "owner":
+        await callback.answer("⛔ Только для владельца.")
+        return
+    from services.user_service import get_all_users
+    users = await get_all_users(session)
+    non_owner = [u for u in users if u.role != "owner"]
+    if not non_owner:
+        await callback.message.edit_text("Нет пользователей для управления.", reply_markup=back_button("menu_users"))
+        return
+    buttons = []
+    for u in non_owner:
+        username = f"@{u.username}" if u.username else "без username"
+        role_name = ROLE_NAMES.get(u.role, u.role)
+        status = "✅" if u.is_active else "❌"
+        buttons.append([InlineKeyboardButton(
+            text=f"{status} {u.full_name} ({username}) — {role_name}",
+            callback_data=f"user_manage_{u.telegram_id}"
+        )])
+    buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="menu_users")])
+    await callback.message.edit_text(
+        "🎭 Выбери пользователя для управления:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+    )
+
+@router.callback_query(F.data.startswith("user_manage_"))
+async def cb_user_manage(callback: CallbackQuery, user: User, session: AsyncSession):
+    if user.role != "owner":
+        await callback.answer("⛔ Только для владельца.")
+        return
+    target_id = int(callback.data.replace("user_manage_", ""))
+    from services.user_service import get_user
+    target = await get_user(session, target_id)
+    if not target:
+        await callback.answer("❌ Пользователь не найден.")
+        return
+    username = f"@{target.username}" if target.username else "без username"
+    role_name = ROLE_NAMES.get(target.role, target.role)
+    status = "✅ Активен" if target.is_active else "❌ Заблокирован"
+    text = (
+        f"👤 {target.full_name} ({username})\n"
+        f"🆔 ID: {target.telegram_id}\n"
+        f"🎭 Роль: {role_name}\n"
+        f"Статус: {status}"
+    )
+    buttons = []
+    for role_key, role_label in [("admin", "🔧 Админ"), ("user", "👤 Юзер"), ("guest", "👣 Гость")]:
+        if target.role != role_key:
+            buttons.append([InlineKeyboardButton(
+                text=f"Назначить {role_label}",
+                callback_data=f"user_setrole_{target_id}_{role_key}"
+            )])
+    buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="users_roles")])
+    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+
+@router.callback_query(F.data.startswith("user_setrole_"))
+async def cb_user_setrole(callback: CallbackQuery, user: User, session: AsyncSession):
+    if user.role != "owner":
+        await callback.answer("⛔ Только для владельца.")
+        return
+    parts = callback.data.replace("user_setrole_", "").split("_")
+    target_id = int(parts[0])
+    role = parts[1]
+    from services.user_service import set_user_role
+    updated = await set_user_role(session, target_id, role)
+    if updated:
+        role_name = ROLE_NAMES.get(role, role)
+        await callback.answer(f"✅ Роль изменена на {role_name}")
+    else:
+        await callback.answer("❌ Пользователь не найден.")
+    await cb_users_roles(callback, user, session)
+
+@router.callback_query(F.data == "users_ban_list")
+async def cb_users_ban_list(callback: CallbackQuery, user: User, session: AsyncSession):
+    if user.role not in ["admin", "owner"]:
+        await callback.answer("⛔ Недостаточно прав.")
+        return
+    from services.user_service import get_all_users
+    users = await get_all_users(session)
+    active_users = [u for u in users if u.is_active and u.role != "owner"]
+    if user.role == "admin":
+        active_users = [u for u in active_users if u.role not in ["admin", "owner"]]
+    if not active_users:
+        await callback.message.edit_text("Нет пользователей для блокировки.", reply_markup=back_button("menu_users"))
+        return
+    buttons = []
+    for u in active_users:
+        username = f"@{u.username}" if u.username else "без username"
+        role_name = ROLE_NAMES.get(u.role, u.role)
+        buttons.append([InlineKeyboardButton(
+            text=f"{u.full_name} ({username}) — {role_name}",
+            callback_data=f"user_ban_{u.telegram_id}"
+        )])
+    buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="menu_users")])
+    await callback.message.edit_text(
+        "🚫 Выбери пользователя для блокировки:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+    )
+
+@router.callback_query(F.data.startswith("user_ban_"))
+async def cb_user_ban(callback: CallbackQuery, user: User, session: AsyncSession):
+    if user.role not in ["admin", "owner"]:
+        await callback.answer("⛔ Недостаточно прав.")
+        return
+    target_id = int(callback.data.replace("user_ban_", ""))
+    from services.user_service import get_user, set_user_active
+    target = await get_user(session, target_id)
+    if not target:
+        await callback.answer("❌ Пользователь не найден.")
+        return
+    if target.role == "owner":
+        await callback.answer("⛔ Нельзя заблокировать владельца.")
+        return
+    if target.role == "admin" and user.role != "owner":
+        await callback.answer("⛔ Нельзя заблокировать администратора.")
+        return
+    await set_user_active(session, target_id, False)
+    await callback.answer(f"✅ {target.full_name} заблокирован.")
+    await cb_users_ban_list(callback, user, session)
+
+@router.callback_query(F.data == "users_unban_list")
+async def cb_users_unban_list(callback: CallbackQuery, user: User, session: AsyncSession):
+    if user.role not in ["admin", "owner"]:
+        await callback.answer("⛔ Недостаточно прав.")
+        return
+    from services.user_service import get_all_users
+    users = await get_all_users(session)
+    blocked_users = [u for u in users if not u.is_active]
+    if not blocked_users:
+        await callback.message.edit_text("Нет заблокированных пользователей.", reply_markup=back_button("menu_users"))
+        return
+    buttons = []
+    for u in blocked_users:
+        username = f"@{u.username}" if u.username else "без username"
+        role_name = ROLE_NAMES.get(u.role, u.role)
+        buttons.append([InlineKeyboardButton(
+            text=f"{u.full_name} ({username}) — {role_name}",
+            callback_data=f"user_unban_{u.telegram_id}"
+        )])
+    buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="menu_users")])
+    await callback.message.edit_text(
+        "✅ Выбери пользователя для разблокировки:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+    )
+
+@router.callback_query(F.data.startswith("user_unban_"))
+async def cb_user_unban(callback: CallbackQuery, user: User, session: AsyncSession):
+    if user.role not in ["admin", "owner"]:
+        await callback.answer("⛔ Недостаточно прав.")
+        return
+    target_id = int(callback.data.replace("user_unban_", ""))
+    from services.user_service import set_user_active, get_user
+    target = await get_user(session, target_id)
+    if not target:
+        await callback.answer("❌ Пользователь не найден.")
+        return
+    await set_user_active(session, target_id, True)
+    await callback.answer(f"✅ {target.full_name} разблокирован.")
+    await cb_users_unban_list(callback, user, session)

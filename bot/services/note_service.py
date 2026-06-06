@@ -48,20 +48,37 @@ async def get_note(session: AsyncSession, note_id: int) -> Note | None:
     )
     return result.scalar_one_or_none()
 
-async def create_note(session: AsyncSession, title: str, content: str, owner_id: int, is_shared: bool = False, category_id: int | None = None) -> Note:
+async def create_note(
+    session: AsyncSession,
+    title: str,
+    content: str,
+    owner_id: int,
+    is_shared: bool = False,
+    category_id: int | None = None,
+    image_file_id: str | None = None
+) -> Note:
     note = Note(
         title=title,
         content=content,
         owner_id=owner_id,
         is_shared=is_shared,
-        category_id=category_id
+        category_id=category_id,
+        image_file_id=image_file_id
     )
     session.add(note)
     await session.commit()
     await session.refresh(note)
     return note
 
-async def update_note(session: AsyncSession, note_id: int, title: str | None = None, content: str | None = None, category_id: int | None = None) -> Note | None:
+async def update_note(
+    session: AsyncSession,
+    note_id: int,
+    title: str | None = None,
+    content: str | None = None,
+    category_id: int | None = None,
+    image_file_id: str | None = None,
+    remove_image: bool = False
+) -> Note | None:
     note = await get_note(session, note_id)
     if not note:
         return None
@@ -71,6 +88,10 @@ async def update_note(session: AsyncSession, note_id: int, title: str | None = N
         note.content = content
     if category_id is not None:
         note.category_id = category_id
+    if image_file_id:
+        note.image_file_id = image_file_id
+    if remove_image:
+        note.image_file_id = None
     await session.commit()
     return note
 

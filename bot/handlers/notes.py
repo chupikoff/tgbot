@@ -16,10 +16,12 @@ router = Router()
 class NoteStates(StatesGroup):
     waiting_title = State()
     waiting_content = State()
+    waiting_image = State()
     waiting_search = State()
     waiting_new_category = State()
     editing_title = State()
     editing_content = State()
+    editing_image = State()
 
 def has_notes_access(user: User) -> bool:
     return user.role in ["owner", "admin", "user"]
@@ -58,14 +60,18 @@ async def cb_my_notes(callback: CallbackQuery, user: User, session: AsyncSession
         for note in notes:
             cat = next((c for c in categories if c.id == note.category_id), None)
             cat_name = f" [{cat.name}]" if cat else ""
+            img = " 🖼" if note.image_file_id else ""
             buttons.append([InlineKeyboardButton(
-                text=f"📄 {note.title}{cat_name}",
+                text=f"📄 {note.title}{cat_name}{img}",
                 callback_data=f"note_view_{note.id}"
             )])
     buttons.append([InlineKeyboardButton(text="➕ Новая заметка", callback_data="note_new")])
     buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="notes_main")])
     text = "📝 Мои заметки:" if notes else "📝 У тебя пока нет заметок."
-    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    try:
+        await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    except Exception:
+        await callback.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
 
 @router.callback_query(F.data == "note_new")
 async def cb_new_note(callback: CallbackQuery, state: FSMContext):
@@ -82,16 +88,33 @@ async def cb_new_shared_note(callback: CallbackQuery, state: FSMContext):
     await state.set_state(NoteStates.waiting_title)
 
 @router.message(NoteStates.waiting_title)
-async def process_title(message: Message, state: FSMContext, user: User, session: AsyncSession):
+async def process_title(message: Message, state: FSMContext):
     await state.update_data(title=message.text)
     await state.set_state(NoteStates.waiting_content)
     await message.answer("📝 Теперь введи текст заметки:")
 
 @router.message(NoteStates.waiting_content)
-async def process_content(message: Message, state: FSMContext, user: User, session: AsyncSession):
+async def process_content(message: Message, state: FSMContext):
+    await state.update_data(content=message.text)
+    await state.set_state(NoteStates.waiting_image)
+    buttons = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⏭ Без изображения", callback_data="note_skip_image")]
+    ])
+    await message.answer("🖼 Прикрепи изображение или пропусти:", reply_markup=buttons)
+
+@router.message(NoteStates.waiting_image, F.photo)
+async def process_image(message: Message, state: FSMContext, user: User, session: AsyncSession):
+    file_id = message.photo[-1].file_id
+    await state.update_data(image_file_id=file_id)
+    await finish_note_creation(message, state, user, session)
+
+@router.callback_query(F.data == "note_skip_image")
+async def cb_skip_image(callback: CallbackQuery, state: FSMContext, user: User, session: AsyncSession):
+    await finish_note_creation(callback.message, state, user, session, from_callback=True)
+
+async def finish_note_creation(message, state: FSMContext, user: User, session: AsyncSession, from_callback: bool = False):
     data = await state.get_data()
     is_shared = data.get("is_shared", False)
-    await state.update_data(content=message.text)
     categories = await get_categories(session, user.telegram_id)
     personal_cats = [c for c in categories if not c.is_shared]
     shared_cats = [c for c in categories if c.is_shared]
@@ -101,7 +124,11 @@ async def process_content(message: Message, state: FSMContext, user: User, sessi
         buttons.append([InlineKeyboardButton(text=f"📂 {cat.name}", callback_data=f"note_setcat_{cat.id}")])
     buttons.append([InlineKeyboardButton(text="➕ Новая категория", callback_data="note_newcat")])
     buttons.append([InlineKeyboardButton(text="⏭ Без категории", callback_data="note_setcat_0")])
-    await message.answer("📂 Выбери категорию:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    markup = InlineKeyboardMarkup(inline_keyboard=buttons)
+    if from_callback:
+        await message.edit_text("📂 Выбери категорию:", reply_markup=markup)
+    else:
+        await message.answer("📂 Выбери категорию:", reply_markup=markup)
 
 @router.callback_query(F.data == "note_newcat")
 async def cb_new_category_for_note(callback: CallbackQuery, state: FSMContext):
@@ -114,9 +141,14 @@ async def process_new_category(message: Message, state: FSMContext, user: User, 
     is_shared = data.get("is_shared", False)
     title = data.get("title")
     content = data.get("content")
+    image_file_id = data.get("image_file_id")
     category = await create_category(session, message.text, user.telegram_id, is_shared=is_shared)
     if title and content:
-        note = await create_note(session, title, content, user.telegram_id, is_shared=is_shared, category_id=category.id)
+        note = await create_note(
+            session, title, content, user.telegram_id,
+            is_shared=is_shared, category_id=category.id,
+            image_file_id=image_file_id
+        )
         await state.clear()
         back = "notes_shared" if is_shared else "notes_my"
         await message.answer(
@@ -137,10 +169,15 @@ async def cb_set_category(callback: CallbackQuery, state: FSMContext, user: User
     await state.clear()
     category_id = cat_id if cat_id != 0 else None
     is_shared = data.get("is_shared", False)
-    note = await create_note(session, data["title"], data["content"], user.telegram_id, is_shared=is_shared, category_id=category_id)
+    image_file_id = data.get("image_file_id")
+    note = await create_note(
+        session, data["title"], data["content"], user.telegram_id,
+        is_shared=is_shared, category_id=category_id,
+        image_file_id=image_file_id
+    )
     back = "notes_shared" if is_shared else "notes_my"
     await callback.message.edit_text(
-        f"✅ Заметка '{note.title}' створена!",
+        f"✅ Заметка '{note.title}' создана!",
         reply_markup=back_button(back)
     )
 
@@ -171,7 +208,18 @@ async def cb_view_note(callback: CallbackQuery, user: User, session: AsyncSessio
         ])
     back = "notes_shared" if note.is_shared else "notes_my"
     buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data=back)])
-    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    markup = InlineKeyboardMarkup(inline_keyboard=buttons)
+    if note.image_file_id:
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+        await callback.message.answer_photo(note.image_file_id, caption=text, reply_markup=markup)
+    else:
+        try:
+            await callback.message.edit_text(text, reply_markup=markup)
+        except Exception:
+            await callback.message.answer(text, reply_markup=markup)
 
 @router.callback_query(F.data.startswith("note_delete_"))
 async def cb_delete_note(callback: CallbackQuery, user: User, session: AsyncSession):
@@ -185,9 +233,9 @@ async def cb_delete_note(callback: CallbackQuery, user: User, session: AsyncSess
         return
     back = "notes_shared" if note.is_shared else "notes_my"
     await delete_note(session, note_id)
-    await callback.message.edit_text("🗑 Заметка удалена.", reply_markup=back_button(back))
+    await callback.message.answer("🗑 Заметка удалена.", reply_markup=back_button(back))
 
-@router.callback_query(F.data.startswith("note_edit_"))
+@router.callback_query(F.data.startswith("note_edit_"), lambda c: c.data.split("_")[2].isdigit())
 async def cb_edit_note(callback: CallbackQuery, state: FSMContext, user: User, session: AsyncSession):
     note_id = int(callback.data.split("_")[2])
     note = await get_note(session, note_id)
@@ -195,29 +243,80 @@ async def cb_edit_note(callback: CallbackQuery, state: FSMContext, user: User, s
         await callback.answer("⛔ Нет доступа.")
         return
     await state.update_data(note_id=note_id, is_shared=note.is_shared)
-    await callback.message.edit_text(f"✏️ Редактирование: '{note.title}'\n\nВведи новый заголовок или /skip чтобы оставить прежний:")
+    await callback.message.answer(
+        f"✏️ Редактирование: '{note.title}'\n\n"
+        f"Текущий заголовок:\n{note.title}\n\n"
+        f"Введи новый заголовок или /skip чтобы оставить:"
+    )
     await state.set_state(NoteStates.editing_title)
 
 @router.message(NoteStates.editing_title)
-async def process_edit_title(message: Message, state: FSMContext):
+async def process_edit_title(message: Message, state: FSMContext, session: AsyncSession):
+    data = await state.get_data()
+    note = await get_note(session, data["note_id"])
     if message.text != "/skip":
         await state.update_data(new_title=message.text)
-    await message.answer("✏️ Введи новый текст или /skip чтобы оставить прежний:")
+    await message.answer(
+        f"Текущий текст заметки:\n\n{note.content}\n\n"
+        f"Введи новый текст или /skip чтобы оставить:"
+    )
     await state.set_state(NoteStates.editing_content)
 
 @router.message(NoteStates.editing_content)
 async def process_edit_content(message: Message, state: FSMContext, session: AsyncSession):
+    if message.text != "/skip":
+        await state.update_data(new_content=message.text)
+    data = await state.get_data()
+    note = await get_note(session, data["note_id"])
+    has_image = "есть 🖼" if note.image_file_id else "нет"
+    buttons = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🖼 Загрузить новое", callback_data="note_edit_upload_image")],
+        [InlineKeyboardButton(text="🗑 Удалить изображение", callback_data="note_edit_remove_image")] if note.image_file_id else [],
+        [InlineKeyboardButton(text="⏭ Оставить как есть", callback_data="note_edit_keep_image")],
+    ])
+    await message.answer(
+        f"🖼 Изображение: {has_image}\n\nЧто сделать с изображением?",
+        reply_markup=buttons
+    )
+    await state.set_state(NoteStates.editing_image)
+
+@router.callback_query(F.data == "note_edit_upload_image")
+async def cb_edit_upload_image(callback: CallbackQuery, state: FSMContext):
+    await callback.message.answer("🖼 Отправь новое изображение:")
+
+@router.message(NoteStates.editing_image, F.photo)
+async def process_edit_image(message: Message, state: FSMContext, session: AsyncSession):
+    file_id = message.photo[-1].file_id
+    await state.update_data(new_image_file_id=file_id)
+    await finish_note_edit(message, state, session)
+
+@router.callback_query(F.data == "note_edit_remove_image")
+async def cb_edit_remove_image(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
+    await state.update_data(remove_image=True)
+    await finish_note_edit(callback.message, state, session, from_callback=True)
+
+@router.callback_query(F.data == "note_edit_keep_image")
+async def cb_edit_keep_image(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
+    await finish_note_edit(callback.message, state, session, from_callback=True)
+
+async def finish_note_edit(message, state: FSMContext, session: AsyncSession, from_callback: bool = False):
     data = await state.get_data()
     await state.clear()
-    new_title = data.get("new_title")
-    new_content = message.text if message.text != "/skip" else None
-    is_shared = data.get("is_shared", False)
-    note = await update_note(session, data["note_id"], title=new_title, content=new_content)
-    back = "notes_shared" if is_shared else "notes_my"
-    await message.answer(
-        f"✅ Заметка '{note.title}' обновлена!",
-        reply_markup=back_button(back)
+    note = await update_note(
+        session,
+        data["note_id"],
+        title=data.get("new_title"),
+        content=data.get("new_content"),
+        image_file_id=data.get("new_image_file_id"),
+        remove_image=data.get("remove_image", False)
     )
+    is_shared = data.get("is_shared", False)
+    back = "notes_shared" if is_shared else "notes_my"
+    text = f"✅ Заметка '{note.title}' обновлена!"
+    if from_callback:
+        await message.edit_text(text, reply_markup=back_button(back))
+    else:
+        await message.answer(text, reply_markup=back_button(back))
 
 @router.callback_query(F.data == "notes_shared")
 async def cb_shared_notes(callback: CallbackQuery, user: User, session: AsyncSession):
@@ -228,14 +327,18 @@ async def cb_shared_notes(callback: CallbackQuery, user: User, session: AsyncSes
         for note in notes:
             cat = next((c for c in categories if c.id == note.category_id), None)
             cat_name = f" [{cat.name}]" if cat else ""
+            img = " 🖼" if note.image_file_id else ""
             buttons.append([InlineKeyboardButton(
-                text=f"🌐 {note.title}{cat_name}",
+                text=f"🌐 {note.title}{cat_name}{img}",
                 callback_data=f"note_view_{note.id}"
             )])
     buttons.append([InlineKeyboardButton(text="➕ Новая общая заметка", callback_data="note_new_shared")])
     buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="notes_main")])
     text = "🌐 Общие заметки:" if notes else "🌐 Общих заметок пока нет."
-    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    try:
+        await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    except Exception:
+        await callback.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
 
 @router.callback_query(F.data == "notes_categories")
 async def cb_categories(callback: CallbackQuery, user: User, session: AsyncSession):
@@ -264,7 +367,11 @@ async def cb_view_category(callback: CallbackQuery, user: User, session: AsyncSe
     cat_notes = [n for n in notes if n.category_id == cat_id]
     buttons = []
     for note in cat_notes:
-        buttons.append([InlineKeyboardButton(text=f"📄 {note.title}", callback_data=f"note_view_{note.id}")])
+        img = " 🖼" if note.image_file_id else ""
+        buttons.append([InlineKeyboardButton(
+            text=f"📄 {note.title}{img}",
+            callback_data=f"note_view_{note.id}"
+        )])
     if category.owner_id == user.telegram_id or user.role in ["owner", "admin"]:
         buttons.append([InlineKeyboardButton(text="🗑 Удалить категорию", callback_data=f"cat_delete_{cat_id}")])
     buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="notes_categories")])
@@ -306,6 +413,13 @@ async def process_search(message: Message, state: FSMContext, user: User, sessio
     buttons = []
     for note in notes:
         icon = "🌐" if note.is_shared else "📄"
-        buttons.append([InlineKeyboardButton(text=f"{icon} {note.title}", callback_data=f"note_view_{note.id}")])
+        img = " 🖼" if note.image_file_id else ""
+        buttons.append([InlineKeyboardButton(
+            text=f"{icon} {note.title}{img}",
+            callback_data=f"note_view_{note.id}"
+        )])
     buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="notes_main")])
-    await message.answer(f"🔍 Найдено заметок: {len(notes)}", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await message.answer(
+        f"🔍 Найдено заметок: {len(notes)}",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+    )

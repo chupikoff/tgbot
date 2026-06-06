@@ -27,16 +27,19 @@ def get_container_info(container_name: str) -> dict | None:
     try:
         client = get_docker_client()
         container = client.containers.get(container_name)
-        stats = container.stats(stream=False)
-        
-        cpu_delta = stats["cpu_stats"]["cpu_usage"]["total_usage"] - stats["precpu_stats"]["cpu_usage"]["total_usage"]
-        system_delta = stats["cpu_stats"]["system_cpu_usage"] - stats["precpu_stats"]["system_cpu_usage"]
-        cpu_percent = round((cpu_delta / system_delta) * 100, 1) if system_delta > 0 else 0.0
+        cpu_percent = 0.0
+        mem_mb = 0.0
+        mem_percent = 0.0
 
-        mem_usage = stats["memory_stats"].get("usage", 0)
-        mem_limit = stats["memory_stats"].get("limit", 1)
-        mem_percent = round((mem_usage / mem_limit) * 100, 1)
-        mem_mb = round(mem_usage / 1024 / 1024, 1)
+        if container.status == "running":
+            stats = container.stats(stream=False)
+            cpu_delta = stats["cpu_stats"]["cpu_usage"]["total_usage"] - stats["precpu_stats"]["cpu_usage"]["total_usage"]
+            system_delta = stats["cpu_stats"].get("system_cpu_usage", 0) - stats["precpu_stats"].get("system_cpu_usage", 0)
+            cpu_percent = round((cpu_delta / system_delta) * 100, 1) if system_delta > 0 else 0.0
+            mem_usage = stats["memory_stats"].get("usage", 0)
+            mem_limit = stats["memory_stats"].get("limit", 1)
+            mem_percent = round((mem_usage / mem_limit) * 100, 1)
+            mem_mb = round(mem_usage / 1024 / 1024, 1)
 
         return {
             "id": container.short_id,
@@ -50,3 +53,20 @@ def get_container_info(container_name: str) -> dict | None:
     except Exception as e:
         logger.error(f"Docker container info error: {e}")
         return None
+
+def container_action(container_name: str, action: str) -> dict:
+    try:
+        client = get_docker_client()
+        container = client.containers.get(container_name)
+        if action == "start":
+            container.start()
+        elif action == "stop":
+            container.stop()
+        elif action == "restart":
+            container.restart()
+        elif action == "remove":
+            container.remove(force=True)
+        return {"success": True}
+    except Exception as e:
+        logger.error(f"Docker action error: {e}")
+        return {"success": False, "error": str(e)}
