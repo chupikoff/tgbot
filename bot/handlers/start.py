@@ -2,10 +2,14 @@ from aiogram import Router, F
 from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from sqlalchemy.ext.asyncio import AsyncSession
 from models.user import User
 
 router = Router()
+
+class AdminStates(StatesGroup):
+    sending_message = State()
 
 ROLE_NAMES = {
     "owner": "👑 Владелец",
@@ -22,9 +26,10 @@ def main_menu(user: User) -> InlineKeyboardMarkup:
         buttons.append([InlineKeyboardButton(text="🧟 Выжить", callback_data="menu_zs")])
     if user.role in ["admin", "owner"]:
         buttons.append([InlineKeyboardButton(text="🖥 Состояние сервера", callback_data="menu_status")])
-        buttons.append([InlineKeyboardButton(text="⚙️ Сервисы", callback_data="menu_services")])
         buttons.append([InlineKeyboardButton(text="🐳 Docker", callback_data="menu_docker")])
         buttons.append([InlineKeyboardButton(text="🌊 Торренты", callback_data="menu_torrents")])
+        buttons.append([InlineKeyboardButton(text="📺 MiniDLNA", callback_data="menu_minidlna")])
+        buttons.append([InlineKeyboardButton(text="🗂 Samba", callback_data="menu_samba")])
         buttons.append([InlineKeyboardButton(text="👥 Пользователи", callback_data="menu_users")])
     if user.role == "owner":
         buttons.append([InlineKeyboardButton(text="💾 Бэкапы", callback_data="menu_backup")])
@@ -120,6 +125,22 @@ async def cb_menu_torrents(callback: CallbackQuery, user: User):
 async def cb_menu_backup(callback: CallbackQuery, user: User):
     from handlers.backup import backup_menu
     await callback.message.edit_text("💾 Меню бэкапов:", reply_markup=backup_menu())
+
+@router.callback_query(F.data == "menu_samba")
+async def cb_menu_samba(callback: CallbackQuery, user: User):
+    if user.role not in ["admin", "owner"]:
+        await callback.answer("⛔ Недостаточно прав.")
+        return
+    from handlers.samba import show_samba
+    await show_samba(callback, user)
+
+@router.callback_query(F.data == "menu_minidlna")
+async def cb_menu_minidlna(callback: CallbackQuery, user: User):
+    if user.role not in ["admin", "owner"]:
+        await callback.answer("⛔ Недостаточно прав.")
+        return
+    from handlers.minidlna import show_minidlna
+    await show_minidlna(callback, user)
 
 @router.callback_query(F.data == "menu_zs")
 async def cb_menu_zs(callback: CallbackQuery, user: User, session: AsyncSession, state: FSMContext):
@@ -227,6 +248,7 @@ async def cb_user_manage(callback: CallbackQuery, user: User, session: AsyncSess
                 text=f"Назначить {role_label}",
                 callback_data=f"user_setrole_{target_id}_{role_key}"
             )])
+    buttons.append([InlineKeyboardButton(text="✉️ Написать сообщение", callback_data=f"user_message_{target_id}")])
     buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="users_roles")])
     await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
 
@@ -246,6 +268,37 @@ async def cb_user_setrole(callback: CallbackQuery, user: User, session: AsyncSes
     else:
         await callback.answer("❌ Пользователь не найден.")
     await cb_users_roles(callback, user, session)
+
+@router.callback_query(F.data.startswith("user_message_"))
+async def cb_user_message(callback: CallbackQuery, user: User, state: FSMContext):
+    if user.role not in ["admin", "owner"]:
+        await callback.answer("⛔ Недостаточно прав.")
+        return
+    target_id = int(callback.data.replace("user_message_", ""))
+    await state.update_data(target_id=target_id)
+    await state.set_state(AdminStates.sending_message)
+    await callback.message.edit_text(
+        "✉️ Введи сообщение для отправки пользователю:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="menu_users")]
+        ])
+    )
+
+@router.message(AdminStates.sending_message)
+async def process_send_message(message: Message, state: FSMContext, user: User):
+    from aiogram import Bot
+    data = await state.get_data()
+    target_id = data.get("target_id")
+    await state.clear()
+    bot: Bot = message.bot
+    try:
+        await bot.send_message(
+            target_id,
+            f"✉️ Сообщение от администратора:\n\n{message.text}"
+        )
+        await message.answer("✅ Сообщение отправлено!", reply_markup=back_button("menu_users"))
+    except Exception as e:
+        await message.answer(f"❌ Ошибка отправки: {str(e)}", reply_markup=back_button("menu_users"))
 
 @router.callback_query(F.data == "users_ban_list")
 async def cb_users_ban_list(callback: CallbackQuery, user: User, session: AsyncSession):

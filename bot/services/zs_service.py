@@ -33,7 +33,7 @@ async def create_player(session: AsyncSession, telegram_id: int, name: str) -> Z
     base = ZSBase(telegram_id=telegram_id, buildings={}, defense_level=0)
     inventory = ZSInventory(
         telegram_id=telegram_id,
-        resources={},
+        resources={"food": 5},
         equipment=STARTER_EQUIPMENT.copy()
     )
     session.add(player)
@@ -73,16 +73,33 @@ async def process_new_day(session: AsyncSession, player: ZSPlayer):
         food_bonus = [2, 5, 10][garden_level - 1]
         resources["food"] = resources.get("food", 0) + food_bonus
 
-    # Потребление еды
-    food = resources.get("food", 0)
-    if food >= 5:
-        resources["food"] = food - 5
-    else:
-        resources["food"] = 0
-        player.hp = max(1, player.hp - 15)
-
+    from sqlalchemy.orm.attributes import flag_modified
     inventory.resources = resources
+    flag_modified(inventory, "resources")
     await session.commit()
+
+# ─── ГОЛОД ───────────────────────────────────────────────────────────────────
+
+async def reduce_hunger(session: AsyncSession, player: ZSPlayer, amount: int):
+    was_hungry = player.hunger == 0
+    player.hunger = max(0, player.hunger - amount)
+    if was_hungry:
+        player.hp = max(1, player.hp - 10)
+    await session.commit()
+
+async def eat_food(session: AsyncSession, player: ZSPlayer, inventory) -> bool:
+    resources = dict(inventory.resources or {})
+    if resources.get("food", 0) <= 0:
+        return False
+    resources["food"] -= 1
+    if resources["food"] == 0:
+        del resources["food"]
+    from sqlalchemy.orm.attributes import flag_modified
+    inventory.resources = resources
+    flag_modified(inventory, "resources")
+    player.hunger = min(10, player.hunger + 2)
+    await session.commit()
+    return True
 
 # ─── РЕСУРСЫ ─────────────────────────────────────────────────────────────────
 
@@ -235,7 +252,7 @@ async def send_npc_on_mission(session: AsyncSession, npc_id: int, location: str)
     return {"success": True}
 
 async def return_npcs(session: AsyncSession, player: ZSPlayer):
-    from services.zs_data import LOCATIONS
+    from services.zs_data import LOCATIONS, get_npc_level_data, get_npc_exp_needed
     result = await session.execute(
         select(ZSNPC).where(
             ZSNPC.telegram_id == player.telegram_id,
@@ -250,22 +267,35 @@ async def return_npcs(session: AsyncSession, player: ZSPlayer):
 
     for npc in npcs:
         loc = LOCATIONS.get(npc.location, {})
-        death_chance = {"1": 10, "2": 20, "3": 35}.get(str(loc.get("tier", 1)), 10)
+        level_data = get_npc_level_data(npc.level)
+        death_chance = level_data["death_chance"]
+        loot_bonus = level_data["loot_bonus"]
+
+        npc.missions_total = (npc.missions_total or 0) + 1
 
         if random.randint(1, 100) <= death_chance:
             npc.is_alive = False
             died.append(npc.name)
         else:
+            npc.missions_survived = (npc.missions_survived or 0) + 1
+            npc.exp = (npc.exp or 0) + 1
+            leveled_up = False
+            if npc.level < 5 and npc.exp >= get_npc_exp_needed(npc.level):
+                npc.level += 1
+                npc.exp = 0
+                leveled_up = True
+
             resources = {}
             for res_id, res_data in loc.get("resources", {}).items():
                 if random.randint(1, 100) <= res_data["chance"] // 2:
-                    amount = random.randint(1, res_data["max"] // 2 + 1)
-                    resources[res_id] = amount
+                    amount = int(random.randint(1, res_data["max"] // 2 + 1) * loot_bonus)
+                    if amount > 0:
+                        resources[res_id] = amount
             if resources:
                 await add_resources(session, inventory, resources)
             npc.status = "idle"
             npc.location = None
-            returned.append({"name": npc.name, "resources": resources})
+            returned.append({"name": npc.name, "resources": resources, "leveled_up": leveled_up, "level": npc.level})
 
     await session.commit()
     return {"returned": returned, "died": died}
@@ -318,6 +348,25 @@ async def night_attack(session: AsyncSession, player: ZSPlayer) -> dict:
         "lost_resources": lost_resources,
         "survived": player.hp > 0,
     }
+
+# ─── СОБЫТИЯ ─────────────────────────────────────────────────────────────────
+
+async def add_event(session: AsyncSession, telegram_id: int, day: int, event_type: str, text: str):
+    from models.zombie_survival import ZSEvent
+    event = ZSEvent(telegram_id=telegram_id, day=day, event_type=event_type, event_text=text)
+    session.add(event)
+    await session.commit()
+
+async def get_events(session: AsyncSession, telegram_id: int, current_day: int) -> list:
+    from models.zombie_survival import ZSEvent
+    from sqlalchemy import select
+    min_day = max(1, current_day - 2)
+    result = await session.execute(
+        select(ZSEvent)
+        .where(ZSEvent.telegram_id == telegram_id, ZSEvent.day >= min_day)
+        .order_by(ZSEvent.day.desc(), ZSEvent.created_at.desc())
+    )
+    return result.scalars().all()
 
 # ─── ИЗОБРАЖЕНИЯ ─────────────────────────────────────────────────────────────
 

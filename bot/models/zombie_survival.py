@@ -13,6 +13,7 @@ class ZSPlayer(Base):
     hp_max: Mapped[int] = mapped_column(Integer, default=100)
     day: Mapped[int] = mapped_column(Integer, default=1)
     game_time: Mapped[int] = mapped_column(Integer, default=360)
+    hunger: Mapped[int] = mapped_column(Integer, default=10)
     is_alive: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
@@ -41,6 +42,10 @@ class ZSNPC(Base):
     name: Mapped[str] = mapped_column(String(64), nullable=False)
     status: Mapped[str] = mapped_column(String(32), default="idle")
     location: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    level: Mapped[int] = mapped_column(Integer, default=1)
+    exp: Mapped[int] = mapped_column(Integer, default=0)
+    missions_total: Mapped[int] = mapped_column(Integer, default=0)
+    missions_survived: Mapped[int] = mapped_column(Integer, default=0)
     is_alive: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 

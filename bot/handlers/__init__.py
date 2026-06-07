@@ -9,6 +9,8 @@ from .media import router as media_router
 from .services import router as services_router
 from .docker_containers import router as docker_router
 from .zs_game import router as zs_router
+from .minidlna import router as minidlna_router
+from .samba import router as samba_router
 
 router = Router()
 router.include_router(start_router)
@@ -21,3 +23,5 @@ router.include_router(media_router)
 router.include_router(services_router)
 router.include_router(docker_router)
 router.include_router(zs_router)
+router.include_router(minidlna_router)
+router.include_router(samba_router)

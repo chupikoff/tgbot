@@ -15,7 +15,6 @@ def backup_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🗄 Бэкап базы данных", callback_data="backup_db")],
         [InlineKeyboardButton(text="⚙️ Бэкап конфигов", callback_data="backup_configs")],
-        [InlineKeyboardButton(text="🔄 Полный бэкап", callback_data="backup_full")],
         [InlineKeyboardButton(text="📋 Список бэкапов", callback_data="backup_list")],
         [InlineKeyboardButton(text="◀️ Главное меню", callback_data="menu_main")],
     ])
@@ -37,6 +36,10 @@ async def cb_backup_main(callback: CallbackQuery, user: User):
     try:
         await callback.message.edit_text("💾 Меню бэкапов:", reply_markup=backup_menu())
     except Exception:
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
         await callback.message.answer("💾 Меню бэкапов:", reply_markup=backup_menu())
 
 @router.callback_query(F.data == "backup_db")

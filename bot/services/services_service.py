@@ -6,19 +6,9 @@ from config import settings
 
 logger = logging.getLogger(__name__)
 
-SERVICES = [
-    "transmission-daemon",
-    "smbd",
-    "minidlna",
-    "docker",
-]
+SERVICES = []
 
-SERVICE_NAMES = {
-    "transmission-daemon": "🌊 Transmission",
-    "smbd": "🗂 Samba",
-    "minidlna": "📺 MiniDLNA",
-    "docker": "🐳 Docker",
-}
+SERVICE_NAMES = {}
 
 def call_service_api(action: str, service: str) -> str:
     try:

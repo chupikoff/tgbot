@@ -44,10 +44,10 @@ LOCATIONS = {
         "max_zombies": 1,
         "resources": {
             "wood":    {"chance": 70, "min": 1, "max": 4},
-            "cloth":   {"chance": 65, "min": 1, "max": 4},
-            "food":    {"chance": 75, "min": 1, "max": 5},
-            "plastic": {"chance": 40, "min": 1, "max": 3},
-            "rubber":  {"chance": 30, "min": 1, "max": 2},
+            "cloth":   {"chance": 40, "min": 1, "max": 2},
+            "food":    {"chance": 40, "min": 1, "max": 2},
+            "plastic": {"chance": 25, "min": 1, "max": 2},
+            "rubber":  {"chance": 20, "min": 1, "max": 1},
         },
         "loot": [
             {"slot": "helmet",  "tier": 1, "chance": 15},
@@ -66,9 +66,9 @@ LOCATIONS = {
         "max_zombies": 1,
         "resources": {
             "wood":    {"chance": 65, "min": 1, "max": 4},
-            "cloth":   {"chance": 55, "min": 1, "max": 3},
+            "cloth":   {"chance": 35, "min": 1, "max": 2},
             "scrap":   {"chance": 60, "min": 1, "max": 4},
-            "plastic": {"chance": 50, "min": 1, "max": 3},
+            "plastic": {"chance": 30, "min": 1, "max": 2},
         },
         "loot": [
             {"slot": "melee",   "tier": 1, "chance": 20},
@@ -86,10 +86,10 @@ LOCATIONS = {
         "zombie_damage": (8, 12),
         "max_zombies": 1,
         "resources": {
-            "food":    {"chance": 80, "min": 2, "max": 6},
-            "cloth":   {"chance": 60, "min": 1, "max": 3},
-            "plastic": {"chance": 55, "min": 1, "max": 4},
-            "rubber":  {"chance": 45, "min": 1, "max": 3},
+            "food":    {"chance": 50, "min": 1, "max": 3},
+            "cloth":   {"chance": 35, "min": 1, "max": 2},
+            "plastic": {"chance": 30, "min": 1, "max": 2},
+            "rubber":  {"chance": 25, "min": 1, "max": 2},
         },
         "loot": [
             {"slot": "backpack","tier": 1, "chance": 20},
@@ -107,8 +107,8 @@ LOCATIONS = {
         "max_zombies": 2,
         "resources": {
             "meds":        {"chance": 70, "min": 1, "max": 4},
-            "cloth":       {"chance": 50, "min": 1, "max": 3},
-            "plastic":     {"chance": 45, "min": 1, "max": 3},
+            "cloth":       {"chance": 30, "min": 1, "max": 2},
+            "plastic":     {"chance": 25, "min": 1, "max": 2},
             "electronics": {"chance": 30, "min": 1, "max": 2},
             "leather":     {"chance": 25, "min": 1, "max": 2},
         },
@@ -129,7 +129,7 @@ LOCATIONS = {
         "max_zombies": 2,
         "resources": {
             "scrap":       {"chance": 75, "min": 2, "max": 5},
-            "rubber":      {"chance": 60, "min": 1, "max": 4},
+            "rubber":      {"chance": 35, "min": 1, "max": 2},
             "fuel":        {"chance": 45, "min": 1, "max": 3},
             "electronics": {"chance": 35, "min": 1, "max": 2},
             "leather":     {"chance": 30, "min": 1, "max": 2},
@@ -219,7 +219,7 @@ BUILDINGS = {
         "name": "🏥 Медпункт",
         "description": "Восстанавливает HP за ночной отдых",
         "levels": [
-            {"cost": {"cloth": 5, "meds": 5},                              "time": 60,  "heal_bonus": 10},
+            {"cost": {"cloth": 8, "food": 5},                              "time": 60,  "heal_bonus": 10},
             {"cost": {"plastic": 8, "meds": 8, "electronics": 5},          "time": 120, "heal_bonus": 25},
             {"cost": {"electronics": 8, "meds": 10, "rare_metals": 3},     "time": 240, "heal_bonus": 50},
         ]
@@ -438,3 +438,18 @@ IMAGE_KEYS = [
     # События
     "night_attack", "victory", "death", "finale", "radio",
 ]
+
+# ─── УРОВНИ НПС ──────────────────────────────────────────────────────────────
+NPC_LEVELS = {
+    1: {"name": "Новичок",  "death_chance": 25, "loot_bonus": 1.0,  "exp_needed": 3},
+    2: {"name": "Выживший", "death_chance": 18, "loot_bonus": 1.1,  "exp_needed": 8},
+    3: {"name": "Опытный",  "death_chance": 12, "loot_bonus": 1.2,  "exp_needed": 15},
+    4: {"name": "Ветеран",  "death_chance": 7,  "loot_bonus": 1.35, "exp_needed": 25},
+    5: {"name": "Легенда",  "death_chance": 3,  "loot_bonus": 1.5,  "exp_needed": 999},
+}
+
+def get_npc_level_data(level: int) -> dict:
+    return NPC_LEVELS.get(level, NPC_LEVELS[1])
+
+def get_npc_exp_needed(level: int) -> int:
+    return NPC_LEVELS.get(level, NPC_LEVELS[1])["exp_needed"]

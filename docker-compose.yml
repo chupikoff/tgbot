@@ -11,6 +11,7 @@ services:
       - /etc/transmission-daemon/settings.json:/etc/transmission-daemon/settings.json:ro
       - /etc/samba/smb.conf:/etc/samba/smb.conf:ro
       - /etc/minidlna.conf:/etc/minidlna.conf:ro
+      - /home/chpk/media:/home/chpk/media:ro
       - /var/run/dbus:/var/run/dbus
       - /run/systemd/private:/run/systemd/private
       - /run/systemd/system:/run/systemd/system

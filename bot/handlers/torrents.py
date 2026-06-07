@@ -4,6 +4,7 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKe
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from models.user import User
+from services.services_service import get_service_status, restart_service, start_service, stop_service
 from services.torrent_service import (
     get_torrents, get_torrent, add_torrent_by_url,
     add_torrent_by_file, remove_torrent, pause_torrent,
@@ -25,6 +26,7 @@ def torrent_menu() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="📋 Список торрентов", callback_data="torrent_list")],
         [InlineKeyboardButton(text="🔗 Добавить по ссылке", callback_data="torrent_add_url")],
         [InlineKeyboardButton(text="📁 Добавить файл", callback_data="torrent_add_file")],
+        [InlineKeyboardButton(text="⚙️ Transmission", callback_data="torrent_transmission")],
         [InlineKeyboardButton(text="◀️ Главное меню", callback_data="menu_main")],
     ])
 
@@ -148,6 +150,68 @@ async def cb_torrent_deletef(callback: CallbackQuery, user: User):
         "🗑 Торрент и все файлы удалены.",
         reply_markup=back_button("torrent_list")
     )
+
+@router.callback_query(F.data == "torrent_transmission")
+async def cb_torrent_transmission(callback: CallbackQuery, user: User):
+    if not has_torrent_access(user):
+        await callback.answer("⛔ Недостаточно прав.")
+        return
+    import asyncio
+    loop = asyncio.get_event_loop()
+    status = await loop.run_in_executor(None, lambda: get_service_status("transmission-daemon"))
+    is_active = status == "active"
+    icon = "🟢" if is_active else "🔴"
+    text = f"⚙️ Transmission\n\nСтатус: {icon} {status}"
+    buttons = []
+    if user.role == "owner":
+        if is_active:
+            buttons.append([InlineKeyboardButton(text="🔄 Перезапустить", callback_data="transmission_restart")])
+            buttons.append([InlineKeyboardButton(text="⏹ Остановить", callback_data="transmission_stop")])
+        else:
+            buttons.append([InlineKeyboardButton(text="▶️ Запустить", callback_data="transmission_start")])
+    buttons.append([InlineKeyboardButton(text="🔄 Обновить", callback_data="torrent_transmission")])
+    buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="torrent_main")])
+    try:
+        await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    except Exception:
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+        await callback.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+
+@router.callback_query(F.data == "transmission_restart")
+async def cb_transmission_restart(callback: CallbackQuery, user: User):
+    if user.role != "owner":
+        await callback.answer("⛔ Только для владельца.")
+        return
+    import asyncio
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(None, lambda: restart_service("transmission-daemon"))
+    await callback.answer("✅ Перезапущен." if result == "OK" else f"❌ {result}")
+    await cb_torrent_transmission(callback, user)
+
+@router.callback_query(F.data == "transmission_stop")
+async def cb_transmission_stop(callback: CallbackQuery, user: User):
+    if user.role != "owner":
+        await callback.answer("⛔ Только для владельца.")
+        return
+    import asyncio
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(None, lambda: stop_service("transmission-daemon"))
+    await callback.answer("✅ Остановлен." if result == "OK" else f"❌ {result}")
+    await cb_torrent_transmission(callback, user)
+
+@router.callback_query(F.data == "transmission_start")
+async def cb_transmission_start(callback: CallbackQuery, user: User):
+    if user.role != "owner":
+        await callback.answer("⛔ Только для владельца.")
+        return
+    import asyncio
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(None, lambda: start_service("transmission-daemon"))
+    await callback.answer("✅ Запущен." if result == "OK" else f"❌ {result}")
+    await cb_torrent_transmission(callback, user)
 
 @router.callback_query(F.data == "torrent_add_url")
 async def cb_add_url(callback: CallbackQuery, state: FSMContext):

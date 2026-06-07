@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     DOWNLOAD_DIR: str = "/home/chpk/media"
     SERVICE_API_TOKEN: str = ""
     SERVICE_API_URL: str = "http://192.168.88.2:7777"
+    OMDB_API_KEY: str = ""
 
     @property
     def database_url(self):

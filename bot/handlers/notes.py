@@ -71,27 +71,44 @@ async def cb_my_notes(callback: CallbackQuery, user: User, session: AsyncSession
     try:
         await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
     except Exception:
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
         await callback.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
 
 @router.callback_query(F.data == "note_new")
 async def cb_new_note(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     await state.update_data(is_shared=False)
-    await callback.message.edit_text("📝 Введи заголовок заметки:", reply_markup=back_button("notes_my"))
+    msg = await callback.message.edit_text("📝 Введи заголовок заметки:", reply_markup=back_button("notes_my"))
+    await state.update_data(prompt_msg_id=callback.message.message_id)
     await state.set_state(NoteStates.waiting_title)
 
 @router.callback_query(F.data == "note_new_shared")
 async def cb_new_shared_note(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     await state.update_data(is_shared=True)
-    await callback.message.edit_text("🌐 Введи заголовок общей заметки:", reply_markup=back_button("notes_shared"))
+    msg = await callback.message.edit_text("🌐 Введи заголовок общей заметки:", reply_markup=back_button("notes_shared"))
+    await state.update_data(prompt_msg_id=callback.message.message_id)
     await state.set_state(NoteStates.waiting_title)
 
 @router.message(NoteStates.waiting_title)
 async def process_title(message: Message, state: FSMContext):
     await state.update_data(title=message.text)
     await state.set_state(NoteStates.waiting_content)
-    await message.answer("📝 Теперь введи текст заметки:")
+    try:
+        await message.delete()
+    except Exception:
+        pass
+    data = await state.get_data()
+    if data.get("prompt_msg_id"):
+        try:
+            await message.bot.delete_message(message.chat.id, data["prompt_msg_id"])
+        except Exception:
+            pass
+    msg = await message.answer("📝 Теперь введи текст заметки:")
+    await state.update_data(prompt_msg_id=msg.message_id)
 
 @router.message(NoteStates.waiting_content)
 async def process_content(message: Message, state: FSMContext):
@@ -100,10 +117,31 @@ async def process_content(message: Message, state: FSMContext):
     buttons = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="⏭ Без изображения", callback_data="note_skip_image")]
     ])
-    await message.answer("🖼 Прикрепи изображение или пропусти:", reply_markup=buttons)
+    try:
+        await message.delete()
+    except Exception:
+        pass
+    data = await state.get_data()
+    if data.get("prompt_msg_id"):
+        try:
+            await message.bot.delete_message(message.chat.id, data["prompt_msg_id"])
+        except Exception:
+            pass
+    msg = await message.answer("🖼 Прикрепи изображение или пропусти:", reply_markup=buttons)
+    await state.update_data(prompt_msg_id=msg.message_id)
 
 @router.message(NoteStates.waiting_image, F.photo)
 async def process_image(message: Message, state: FSMContext, user: User, session: AsyncSession):
+    try:
+        await message.delete()
+    except Exception:
+        pass
+    data = await state.get_data()
+    if data.get("prompt_msg_id"):
+        try:
+            await message.bot.delete_message(message.chat.id, data["prompt_msg_id"])
+        except Exception:
+            pass
     file_id = message.photo[-1].file_id
     await state.update_data(image_file_id=file_id)
     await finish_note_creation(message, state, user, session)
@@ -233,6 +271,10 @@ async def cb_delete_note(callback: CallbackQuery, user: User, session: AsyncSess
         return
     back = "notes_shared" if note.is_shared else "notes_my"
     await delete_note(session, note_id)
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
     await callback.message.answer("🗑 Заметка удалена.", reply_markup=back_button(back))
 
 @router.callback_query(F.data.startswith("note_edit_"), lambda c: c.data.split("_")[2].isdigit())
@@ -243,27 +285,52 @@ async def cb_edit_note(callback: CallbackQuery, state: FSMContext, user: User, s
         await callback.answer("⛔ Нет доступа.")
         return
     await state.update_data(note_id=note_id, is_shared=note.is_shared)
-    await callback.message.answer(
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+    msg = await callback.message.answer(
         f"✏️ Редактирование: '{note.title}'\n\n"
         f"Текущий заголовок:\n{note.title}\n\n"
         f"Введи новый заголовок или /skip чтобы оставить:"
     )
+    await state.update_data(prompt_msg_id=msg.message_id)
     await state.set_state(NoteStates.editing_title)
 
 @router.message(NoteStates.editing_title)
 async def process_edit_title(message: Message, state: FSMContext, session: AsyncSession):
+    try:
+        await message.delete()
+    except Exception:
+        pass
     data = await state.get_data()
+    if data.get("prompt_msg_id"):
+        try:
+            await message.bot.delete_message(message.chat.id, data["prompt_msg_id"])
+        except Exception:
+            pass
     note = await get_note(session, data["note_id"])
     if message.text != "/skip":
         await state.update_data(new_title=message.text)
-    await message.answer(
+    msg = await message.answer(
         f"Текущий текст заметки:\n\n{note.content}\n\n"
         f"Введи новый текст или /skip чтобы оставить:"
     )
+    await state.update_data(prompt_msg_id=msg.message_id)
     await state.set_state(NoteStates.editing_content)
 
 @router.message(NoteStates.editing_content)
 async def process_edit_content(message: Message, state: FSMContext, session: AsyncSession):
+    try:
+        await message.delete()
+    except Exception:
+        pass
+    data = await state.get_data()
+    if data.get("prompt_msg_id"):
+        try:
+            await message.bot.delete_message(message.chat.id, data["prompt_msg_id"])
+        except Exception:
+            pass
     if message.text != "/skip":
         await state.update_data(new_content=message.text)
     data = await state.get_data()
@@ -338,6 +405,10 @@ async def cb_shared_notes(callback: CallbackQuery, user: User, session: AsyncSes
     try:
         await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
     except Exception:
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
         await callback.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
 
 @router.callback_query(F.data == "notes_categories")

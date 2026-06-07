@@ -4,6 +4,7 @@ from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from models.user import User
 from services.docker_service import get_containers, get_container_info, container_action
+from services.services_service import get_service_status, restart_service, start_service, stop_service
 
 router = Router()
 
@@ -13,6 +14,7 @@ def is_admin_or_above(user: User) -> bool:
 def docker_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📋 Список контейнеров", callback_data="docker_list")],
+        [InlineKeyboardButton(text="⚙️ Сервис Docker", callback_data="docker_service")],
         [InlineKeyboardButton(text="◀️ Главное меню", callback_data="menu_main")],
     ])
 
@@ -50,6 +52,64 @@ async def cb_docker_list(callback: CallbackQuery, user: User):
         buttons.append([InlineKeyboardButton(text=f"{icon} {c['name']}", callback_data=f"docker_view_{c['name']}")])
     buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="docker_main")])
     await callback.message.edit_text("📋 Контейнеры:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+
+@router.callback_query(F.data == "docker_service")
+async def cb_docker_service(callback: CallbackQuery, user: User):
+    if not is_admin_or_above(user):
+        await callback.answer("⛔ Недостаточно прав.")
+        return
+    loop = asyncio.get_event_loop()
+    status = await loop.run_in_executor(None, lambda: get_service_status("docker"))
+    is_active = status == "active"
+    icon = "🟢" if is_active else "🔴"
+    text = f"🐳 Сервис Docker\n\nСтатус: {icon} {status}"
+    buttons = []
+    if user.role == "owner":
+        if is_active:
+            buttons.append([InlineKeyboardButton(text="🔄 Перезапустить", callback_data="docker_svc_restart")])
+            buttons.append([InlineKeyboardButton(text="⏹ Остановить", callback_data="docker_svc_stop")])
+        else:
+            buttons.append([InlineKeyboardButton(text="▶️ Запустить", callback_data="docker_svc_start")])
+    buttons.append([InlineKeyboardButton(text="🔄 Обновить", callback_data="docker_service")])
+    buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="docker_main")])
+    try:
+        await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    except Exception:
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+        await callback.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+
+@router.callback_query(F.data == "docker_svc_restart")
+async def cb_docker_svc_restart(callback: CallbackQuery, user: User):
+    if user.role != "owner":
+        await callback.answer("⛔ Только для владельца.")
+        return
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(None, lambda: restart_service("docker"))
+    await callback.answer("✅ Перезапущен." if result == "OK" else f"❌ {result}")
+    await cb_docker_service(callback, user)
+
+@router.callback_query(F.data == "docker_svc_stop")
+async def cb_docker_svc_stop(callback: CallbackQuery, user: User):
+    if user.role != "owner":
+        await callback.answer("⛔ Только для владельца.")
+        return
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(None, lambda: stop_service("docker"))
+    await callback.answer("✅ Остановлен." if result == "OK" else f"❌ {result}")
+    await cb_docker_service(callback, user)
+
+@router.callback_query(F.data == "docker_svc_start")
+async def cb_docker_svc_start(callback: CallbackQuery, user: User):
+    if user.role != "owner":
+        await callback.answer("⛔ Только для владельца.")
+        return
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(None, lambda: start_service("docker"))
+    await callback.answer("✅ Запущен." if result == "OK" else f"❌ {result}")
+    await cb_docker_service(callback, user)
 
 async def show_container_info(callback: CallbackQuery, user: User, name: str):
     try:

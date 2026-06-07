@@ -94,6 +94,10 @@ async def show_media_list(callback: CallbackQuery, user: User, session: AsyncSes
     try:
         await callback.message.edit_text(text, reply_markup=markup)
     except Exception:
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
         await callback.message.answer(text, reply_markup=markup)
 
 @router.callback_query(F.data.startswith("media_list_"))
@@ -127,6 +131,10 @@ async def cb_media_view(callback: CallbackQuery, user: User, session: AsyncSessi
         ])
     buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="media_list_0")])
 
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
     await callback.message.answer_video(
         media.file_id,
         caption=caption,
@@ -140,16 +148,17 @@ async def cb_media_add(callback: CallbackQuery, state: FSMContext, user: User):
     if not is_admin_or_above(user):
         await callback.answer("⛔ Недостаточно прав.")
         return
-    try:
-        await callback.message.edit_text("🎬 Введи название видео:", reply_markup=back_button("media_list_0"))
-    except Exception:
-        await callback.message.answer("🎬 Введи название видео:", reply_markup=back_button("media_list_0"))
+    await callback.message.edit_text("🎬 Введи название видео:", reply_markup=back_button("media_list_0"))
     await state.set_state(MediaStates.waiting_title)
 
 @router.message(MediaStates.waiting_title)
 async def process_media_title(message: Message, state: FSMContext):
     await state.update_data(title=message.text)
     await state.set_state(MediaStates.waiting_description)
+    try:
+        await message.delete()
+    except Exception:
+        pass
     buttons = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="⏭ Пропустить", callback_data="media_skip_description")]
     ])
@@ -159,13 +168,21 @@ async def process_media_title(message: Message, state: FSMContext):
 async def process_media_description(message: Message, state: FSMContext):
     await state.update_data(description=message.text)
     await state.set_state(MediaStates.waiting_file)
+    try:
+        await message.delete()
+    except Exception:
+        pass
     await message.answer("🎬 Теперь перешли видео из Telegram:")
 
 @router.callback_query(F.data == "media_skip_description")
 async def cb_skip_description(callback: CallbackQuery, state: FSMContext):
     await state.update_data(description=None)
     await state.set_state(MediaStates.waiting_file)
-    await callback.message.edit_text("🎬 Теперь перешли видео из Telegram:")
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+    await callback.message.answer("🎬 Теперь перешли видео из Telegram:")
 
 @router.message(MediaStates.waiting_file)
 async def process_media_file(message: Message, state: FSMContext, user: User, session: AsyncSession):
@@ -193,17 +210,36 @@ async def process_media_file(message: Message, state: FSMContext, user: User, se
 @router.callback_query(F.data == "media_newcat")
 async def cb_media_newcat(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text("📂 Введи название новой категории:")
+    await state.update_data(prompt_msg_id=callback.message.message_id)
     await state.set_state(MediaStates.waiting_new_category)
 
 @router.message(MediaStates.waiting_new_category)
 async def process_new_category(message: Message, state: FSMContext, user: User, session: AsyncSession):
     data = await state.get_data()
     cat = await create_category(session, message.text, user.telegram_id)
+    try:
+        await message.delete()
+    except Exception:
+        pass
+    if data.get("prompt_msg_id"):
+        try:
+            await message.bot.delete_message(message.chat.id, data["prompt_msg_id"])
+        except Exception:
+            pass
     if data.get("creating_cat_only"):
         await state.clear()
         await message.answer(
             f"✅ Категория '{cat.name}' создана!",
             reply_markup=back_button("media_categories")
+        )
+        return
+    if data.get("editing_cat"):
+        media_id = data.get("media_id")
+        await state.clear()
+        await update_media(session, media_id, category_id=cat.id)
+        await message.answer(
+            f"✅ Категория изменена на '{cat.name}'!",
+            reply_markup=back_button("media_list_0")
         )
         return
     await state.clear()
@@ -264,6 +300,10 @@ async def cb_media_edit(callback: CallbackQuery, user: User, session: AsyncSessi
             reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
         )
     except Exception:
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
         await callback.message.answer(
             f"✏️ Редактирование: {media.title}",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -274,13 +314,28 @@ async def cb_edit_title(callback: CallbackQuery, state: FSMContext):
     media_id = int(callback.data.split("_")[3])
     await state.update_data(media_id=media_id)
     await state.set_state(MediaStates.editing_title)
-    await callback.message.edit_text("✏️ Введи новое название:")
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+    msg = await callback.message.answer("✏️ Введи новое название:")
+    await state.update_data(prompt_msg_id=msg.message_id)
 
 @router.message(MediaStates.editing_title)
 async def process_edit_title(message: Message, state: FSMContext, session: AsyncSession):
     data = await state.get_data()
+    prompt_id = data.get("prompt_msg_id")
     await state.clear()
     media = await update_media(session, data["media_id"], title=message.text)
+    try:
+        await message.delete()
+    except Exception:
+        pass
+    if prompt_id:
+        try:
+            await message.bot.delete_message(message.chat.id, prompt_id)
+        except Exception:
+            pass
     await message.answer(f"✅ Название изменено на '{media.title}'!", reply_markup=back_button("media_list_0"))
 
 @router.callback_query(F.data.startswith("media_edit_desc_"))
@@ -291,13 +346,28 @@ async def cb_edit_desc(callback: CallbackQuery, state: FSMContext):
     buttons = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🗑 Удалить описание", callback_data="media_clear_desc")]
     ])
-    await callback.message.edit_text("📝 Введи новое описание:", reply_markup=buttons)
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+    msg = await callback.message.answer("📝 Введи новое описание:", reply_markup=buttons)
+    await state.update_data(prompt_msg_id=msg.message_id)
 
 @router.message(MediaStates.editing_description)
 async def process_edit_desc(message: Message, state: FSMContext, session: AsyncSession):
     data = await state.get_data()
+    prompt_id = data.get("prompt_msg_id")
     await state.clear()
     await update_media(session, data["media_id"], description=message.text)
+    try:
+        await message.delete()
+    except Exception:
+        pass
+    if prompt_id:
+        try:
+            await message.bot.delete_message(message.chat.id, prompt_id)
+        except Exception:
+            pass
     await message.answer("✅ Описание обновлено!", reply_markup=back_button("media_list_0"))
 
 @router.callback_query(F.data == "media_clear_desc")
@@ -312,7 +382,12 @@ async def cb_edit_file(callback: CallbackQuery, state: FSMContext):
     media_id = int(callback.data.split("_")[3])
     await state.update_data(media_id=media_id)
     await state.set_state(MediaStates.editing_file)
-    await callback.message.edit_text("🎬 Отправь новое видео:")
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+    msg = await callback.message.answer("🎬 Отправь новое видео:")
+    await state.update_data(prompt_msg_id=msg.message_id)
 
 @router.message(MediaStates.editing_file)
 async def process_edit_file(message: Message, state: FSMContext, session: AsyncSession):
@@ -324,25 +399,45 @@ async def process_edit_file(message: Message, state: FSMContext, session: AsyncS
     else:
         await message.answer("❌ Отправь видео или файл.")
         return
+    prompt_id = data.get("prompt_msg_id")
     await state.clear()
     await update_media(session, data["media_id"], file_id=file_id)
+    try:
+        await message.delete()
+    except Exception:
+        pass
+    if prompt_id:
+        try:
+            await message.bot.delete_message(message.chat.id, prompt_id)
+        except Exception:
+            pass
     await message.answer("✅ Видео заменено!", reply_markup=back_button("media_list_0"))
 
 @router.callback_query(F.data.startswith("media_edit_cat_"))
 async def cb_edit_cat(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
     media_id = int(callback.data.split("_")[3])
     await state.update_data(media_id=media_id, editing_cat=True)
+    media = await get_media(session, media_id)
     categories = await get_all_categories(session)
     buttons = []
     for cat in categories:
         buttons.append([InlineKeyboardButton(text=f"📂 {cat.name}", callback_data=f"media_updatecat_{media_id}_{cat.id}")])
     buttons.append([InlineKeyboardButton(text="➕ Новая категория", callback_data=f"media_newcat_edit_{media_id}")])
-    buttons.append([InlineKeyboardButton(text="🗑 Убрать категорию", callback_data=f"media_updatecat_{media_id}_0")])
+    if media and media.category_id:
+        buttons.append([InlineKeyboardButton(text="🗑 Убрать категорию", callback_data=f"media_updatecat_{media_id}_0")])
     buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data=f"media_edit_{media_id}")])
     try:
         await callback.message.edit_text("📂 Выбери категорию:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
     except Exception:
         await callback.message.answer("📂 Выбери категорию:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+
+@router.callback_query(F.data.startswith("media_newcat_edit_"))
+async def cb_media_newcat_edit(callback: CallbackQuery, state: FSMContext):
+    media_id = int(callback.data.replace("media_newcat_edit_", ""))
+    await state.update_data(media_id=media_id, editing_cat=True)
+    await callback.message.edit_text("📂 Введи название новой категории:")
+    await state.update_data(prompt_msg_id=callback.message.message_id)
+    await state.set_state(MediaStates.waiting_new_category)
 
 @router.callback_query(F.data.startswith("media_updatecat_"))
 async def cb_update_cat(callback: CallbackQuery, session: AsyncSession):
@@ -419,6 +514,7 @@ async def cb_cat_new(callback: CallbackQuery, state: FSMContext, user: User):
     await state.update_data(creating_cat_only=True)
     await state.set_state(MediaStates.waiting_new_category)
     await callback.message.edit_text("📂 Введи название новой категории:")
+    await state.update_data(prompt_msg_id=callback.message.message_id)
 
 @router.callback_query(F.data.startswith("media_cat_delete_"))
 async def cb_cat_delete(callback: CallbackQuery, user: User, session: AsyncSession):
