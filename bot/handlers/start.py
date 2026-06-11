@@ -25,7 +25,6 @@ def main_menu(user: User) -> InlineKeyboardMarkup:
         buttons.append([InlineKeyboardButton(text="🎬 Медиатека", callback_data="menu_media")])
         buttons.append([InlineKeyboardButton(text="🧟 Выжить", callback_data="menu_zs")])
     if user.role in ["admin", "owner"]:
-        buttons.append([InlineKeyboardButton(text="🖥 Состояние сервера", callback_data="menu_status")])
         buttons.append([InlineKeyboardButton(text="🐳 Docker", callback_data="menu_docker")])
         buttons.append([InlineKeyboardButton(text="🌊 Торренты", callback_data="menu_torrents")])
         buttons.append([InlineKeyboardButton(text="📺 MiniDLNA", callback_data="menu_minidlna")])
@@ -59,27 +58,36 @@ def users_menu(user: User) -> InlineKeyboardMarkup:
 async def cmd_start(message: Message, user: User):
     role_name = ROLE_NAMES.get(user.role, user.role)
     username = f"@{user.username}" if user.username else "не указан"
-    await message.answer(
+    text = (
         f"👋 Привет, {user.full_name}!\n\n"
         f"🆔 ID: {user.telegram_id}\n"
         f"👤 Username: {username}\n"
         f"🎭 Роль: {role_name}\n"
-        f"📅 В системе с: {user.created_at.strftime('%d.%m.%Y')}",
-        reply_markup=main_menu(user)
+        f"📅 В системе с: {user.created_at.strftime('%d.%m.%Y')}"
     )
+    if user.role in ["admin", "owner"]:
+        from services.monitoring import format_status_message
+        text += f"\n\n{format_status_message()}"
+    await message.answer(text, reply_markup=main_menu(user))
 
 @router.callback_query(F.data == "menu_main")
 async def cb_main_menu(callback: CallbackQuery, user: User):
     role_name = ROLE_NAMES.get(user.role, user.role)
     username = f"@{user.username}" if user.username else "не указан"
-    await callback.message.edit_text(
+    text = (
         f"👋 Привет, {user.full_name}!\n\n"
         f"🆔 ID: {user.telegram_id}\n"
         f"👤 Username: {username}\n"
         f"🎭 Роль: {role_name}\n"
-        f"📅 В системе с: {user.created_at.strftime('%d.%m.%Y')}",
-        reply_markup=main_menu(user)
+        f"📅 В системе с: {user.created_at.strftime('%d.%m.%Y')}"
     )
+    if user.role in ["admin", "owner"]:
+        from services.monitoring import format_status_message
+        text += f"\n\n{format_status_message()}"
+    try:
+        await callback.message.edit_text(text, reply_markup=main_menu(user))
+    except Exception:
+        await callback.message.answer(text, reply_markup=main_menu(user))
 
 @router.callback_query(F.data == "menu_notes")
 async def cb_menu_notes(callback: CallbackQuery, user: User):
@@ -144,33 +152,8 @@ async def cb_menu_minidlna(callback: CallbackQuery, user: User):
 
 @router.callback_query(F.data == "menu_zs")
 async def cb_menu_zs(callback: CallbackQuery, user: User, session: AsyncSession, state: FSMContext):
-    from services.zs_service import get_player, get_base
-    from handlers.zs_game import format_status, main_menu, ZSStates
-    player = await get_player(session, user.telegram_id)
-    if not player:
-        await callback.message.edit_text(
-            "🧟 Добро пожаловать в зону заражения!\n\n"
-            "Учёные из Великой Крокожии работают над вакциной.\n"
-            "Твоя задача — выжить 30 дней.\n\n"
-            "Введи имя своего персонажа:"
-        )
-        await state.set_state(ZSStates.entering_name)
-        return
-    if not player.is_alive:
-        from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-        await callback.message.edit_text(
-            "💀 Твой персонаж погиб.\n\nХочешь начать заново?",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔄 Начать заново", callback_data="zs_restart")]
-            ])
-        )
-        return
-    base = await get_base(session, user.telegram_id)
-    text = format_status(player)
-    try:
-        await callback.message.edit_text(text, reply_markup=main_menu(player, base))
-    except Exception:
-        await callback.message.answer(text, reply_markup=main_menu(player, base))
+    from handlers.zs_game import cb_zs_menu
+    await cb_zs_menu(callback, user, session)
 
 @router.callback_query(F.data == "menu_users")
 async def cb_menu_users(callback: CallbackQuery, user: User):
@@ -277,12 +260,13 @@ async def cb_user_message(callback: CallbackQuery, user: User, state: FSMContext
     target_id = int(callback.data.replace("user_message_", ""))
     await state.update_data(target_id=target_id)
     await state.set_state(AdminStates.sending_message)
-    await callback.message.edit_text(
+    msg = await callback.message.edit_text(
         "✉️ Введи сообщение для отправки пользователю:",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="❌ Отмена", callback_data="menu_users")]
         ])
     )
+    await state.update_data(prompt_msg_id=callback.message.message_id)
 
 @router.message(AdminStates.sending_message)
 async def process_send_message(message: Message, state: FSMContext, user: User):
@@ -291,6 +275,15 @@ async def process_send_message(message: Message, state: FSMContext, user: User):
     target_id = data.get("target_id")
     await state.clear()
     bot: Bot = message.bot
+    try:
+        await message.delete()
+    except Exception:
+        pass
+    if data.get("prompt_msg_id"):
+        try:
+            await bot.delete_message(message.chat.id, data["prompt_msg_id"])
+        except Exception:
+            pass
     try:
         await bot.send_message(
             target_id,

@@ -1,25 +1,26 @@
+import random as _r
 from aiogram import Router, F
-from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from models.user import User
-from models.zombie_survival import ZSPlayer, ZSBase, ZSInventory
-from services.zs_service import (
-    get_player, get_base, get_inventory, create_player, reset_player,
-    advance_time, add_resources, remove_resources, build, upgrade_base,
-    upgrade_equipment, get_npcs, add_npc, send_npc_on_mission, night_attack,
-    get_image, set_image, return_npcs, reduce_hunger, eat_food,
-    add_event, get_events
-)
-from services.zs_data import NPC_LEVELS, get_npc_level_data, get_npc_exp_needed
-from services.zs_data import (
-    RESOURCES, LOCATIONS, BUILDINGS, DEFENSE_LEVELS, BASE_LEVELS,
-    EQUIPMENT_CHAINS, STARTER_EQUIPMENT, NPC_NAMES, RADIO_MESSAGES,
-    IMAGE_KEYS, is_daytime, format_time, get_total_defense,
-    get_backpack_slots, get_equipment_item, get_workshop_tier, get_max_npcs
-)
 from sqlalchemy.ext.asyncio import AsyncSession
+from models.user import User
+from models.zombie_survival import ZSPlayer, ZSBase, ZSInventory, ZSNPC
+from services.zs_service import (
+    get_player, create_player, delete_player,
+    get_base, get_inventory, get_npcs, get_max_npcs,
+    add_event, get_events, get_random_scenario,
+    start_raid, process_raid_option, process_combat_victory,
+    process_night, return_npcs, feed_npc, send_npc_on_mission,
+    eat_food, use_meds, upgrade_building, craft_equipment,
+    get_player_defense, get_player_melee_damage, get_player_ranged_damage,
+)
+from services.zs_data import (
+    RESOURCES, CLASSES, LOCATIONS, EQUIPMENT, BUILDINGS,
+    NPC_LEVELS, get_npc_level_data, get_npc_exp_needed,
+    TIPS, NIGHT_ATTACK_CHANCE,
+)
+from services.zs_data import get_horde_stats
 
 router = Router()
 
@@ -30,384 +31,412 @@ class ZSStates(StatesGroup):
 def has_access(user: User) -> bool:
     return user.role in ["owner", "admin", "user"]
 
-def back_button(callback: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="◀️ Назад", callback_data=callback)]
-    ])
-
-def dead_menu() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔄 Начать заново", callback_data="zs_restart")]
-    ])
-
-def fight_buttons(loc_id: str, zombie_hp: int, zombie_hp_max: int, zombie_index: int = 0) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⚔️ Ближний бой", callback_data=f"zs_fight_melee_{loc_id}_{zombie_hp}_{zombie_hp_max}_{zombie_index}")],
-        [InlineKeyboardButton(text="🔫 Стрелять",    callback_data=f"zs_fight_ranged_{loc_id}_{zombie_hp}_{zombie_hp_max}_{zombie_index}")],
-        [InlineKeyboardButton(text="🏃 Убежать",     callback_data=f"zs_fight_run_{loc_id}_{zombie_hp}_{zombie_hp_max}_{zombie_index}")],
-    ])
+# ─── ГЛАВНОЕ МЕНЮ ─────────────────────────────────────────────────────────────
 
 def main_menu(player: ZSPlayer, base: ZSBase) -> InlineKeyboardMarkup:
-    time_str = format_time(player.game_time)
-    is_day = is_daytime(player.game_time)
-    time_icon = "☀️" if is_day else "🌙"
     buttons = [
-        [InlineKeyboardButton(text=f"{time_icon} День {player.day} | {time_str}", callback_data="zs_time_info")],
-    ]
-    if is_day:
-        buttons.append([InlineKeyboardButton(text="🗺 Вылазка", callback_data="zs_raid")])
-    else:
-        buttons.append([InlineKeyboardButton(text="🌙 Ночь — отдохнуть", callback_data="zs_night")])
-    buttons += [
-        [InlineKeyboardButton(text="🏠 База", callback_data="zs_base")],
-        [InlineKeyboardButton(text="🎒 Инвентарь", callback_data="zs_inventory")],
-        [InlineKeyboardButton(text="👥 Выжившие", callback_data="zs_npcs")],
-        [InlineKeyboardButton(text="📻 Радио", callback_data="zs_radio")],
-        [InlineKeyboardButton(text="📋 Лог событий", callback_data="zs_log")],
-        [InlineKeyboardButton(text="❓ Помощь", callback_data="zs_help")],
+        [InlineKeyboardButton(text="🗺 Вылазка", callback_data="zs_raid"),
+         InlineKeyboardButton(text="🏠 База", callback_data="zs_base")],
+        [InlineKeyboardButton(text="🎒 Инвентарь", callback_data="zs_inventory"),
+         InlineKeyboardButton(text="👥 Выжившие", callback_data="zs_npcs")],
+        [InlineKeyboardButton(text="😴 Отдохнуть до утра", callback_data="zs_sleep")],
+        [InlineKeyboardButton(text="📋 Лог событий", callback_data="zs_events"),
+         InlineKeyboardButton(text="❓ Помощь", callback_data="zs_help")],
         [InlineKeyboardButton(text="◀️ Главное меню", callback_data="menu_main")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-def format_status(player: ZSPlayer) -> str:
-    hp_bar_filled = int(player.hp / player.hp_max * 10)
-    hp_bar = "❤️" * hp_bar_filled + "🖤" * (10 - hp_bar_filled)
-    hunger = getattr(player, "hunger", 10)
-    hunger_bar = "🍖" * hunger + "⬛" * (10 - hunger)
+async def show_main(callback: CallbackQuery, player: ZSPlayer, base: ZSBase, inventory: ZSInventory):
+    hunger = player.hunger or 0
     if hunger == 0:
         hunger_icon = "💀"
     elif hunger <= 3:
         hunger_icon = "⚠️"
     else:
         hunger_icon = "🍖"
-    return (
-        f"👤 {player.name}\n"
-        f"{hp_bar}\n"
+    hunger_bar = "🍖" * hunger + "⬛" * (10 - hunger)
+    class_data = CLASSES.get(player.player_class or "soldier", CLASSES["soldier"])
+
+    text = (
+        f"🧟 Зомби Выживание\n\n"
+        f"👤 {player.name} | {class_data['name']}\n"
         f"❤️ HP: {player.hp}/{player.hp_max}\n"
         f"{hunger_bar}\n"
         f"{hunger_icon} Голод: {hunger}/10\n"
         f"📅 День {player.day}\n"
-        f"⏰ {format_time(player.game_time)}"
     )
 
-# ─── СОЗДАНИЕ ПЕРСОНАЖА ──────────────────────────────────────────────────────
+    try:
+        await callback.message.edit_text(text, reply_markup=main_menu(player, base))
+    except Exception:
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+        await callback.message.answer(text, reply_markup=main_menu(player, base))
 
-@router.message(Command("zs"))
-async def cmd_zs(message: Message, user: User, session: AsyncSession, state: FSMContext):
+@router.callback_query(F.data == "menu_zs")
+async def cb_zs_menu(callback: CallbackQuery, user: User, session: AsyncSession):
     if not has_access(user):
-        await message.answer("⛔ Недостаточно прав.")
+        await callback.answer("⛔ Недостаточно прав.")
         return
     player = await get_player(session, user.telegram_id)
-    if not player:
-        await message.answer(
-            "🧟 Добро пожаловать в зону заражения!\n\n"
-            "Учёные из Великой Крокожии работают над вакциной.\n"
-            "Твоя задача — выжить как можно дольше.\n\n"
-            "Введи имя своего персонажа:"
-        )
-        await state.set_state(ZSStates.entering_name)
-        return
-    if not player.is_alive:
-        await message.answer(
-            "💀 Твой персонаж погиб.\n\nХочешь начать заново?",
-            reply_markup=dead_menu()
-        )
+    if not player or not player.is_alive:
+        await cb_zs_start(callback, user, session)
         return
     base = await get_base(session, user.telegram_id)
-    image = await get_image(session, f"base_{base.level}")
-    text = format_status(player)
-    if image:
-        await message.answer_photo(image.file_id, caption=text, reply_markup=main_menu(player, base))
-    else:
-        await message.answer(text, reply_markup=main_menu(player, base))
-
-@router.message(ZSStates.entering_name)
-async def process_name(message: Message, state: FSMContext, user: User, session: AsyncSession):
-    name = message.text.strip()
-    if len(name) < 2 or len(name) > 32:
-        await message.answer("❌ Имя должно быть от 2 до 32 символов.")
-        return
-    await state.clear()
-    player = await create_player(session, user.telegram_id, name)
-    base = await get_base(session, user.telegram_id)
-    await message.answer(
-        f"✅ Персонаж создан!\n\n{format_status(player)}\n\n"
-        f"📻 {RADIO_MESSAGES[1]}",
-        reply_markup=main_menu(player, base)
-    )
-
-# ─── ГЛАВНОЕ МЕНЮ ────────────────────────────────────────────────────────────
+    inventory = await get_inventory(session, user.telegram_id)
+    await show_main(callback, player, base, inventory)
 
 @router.callback_query(F.data == "zs_main")
 async def cb_zs_main(callback: CallbackQuery, user: User, session: AsyncSession):
     player = await get_player(session, user.telegram_id)
     if not player or not player.is_alive:
-        await callback.answer("❌ Персонаж не найден.")
+        await cb_zs_start(callback, user, session)
         return
     base = await get_base(session, user.telegram_id)
-    text = format_status(player)
-    image = await get_image(session, f"base_{base.level}")
-    if image:
+    inventory = await get_inventory(session, user.telegram_id)
+    await show_main(callback, player, base, inventory)
+
+# ─── СОЗДАНИЕ ПЕРСОНАЖА ───────────────────────────────────────────────────────
+
+async def cb_zs_start(callback: CallbackQuery, user: User, session: AsyncSession):
+    text = (
+        "🧟 Зомби Выживание\n\n"
+        "Выбери класс персонажа:"
+    )
+    buttons = []
+    for class_id, class_data in CLASSES.items():
+        buttons.append([InlineKeyboardButton(
+            text=f"{class_data['name']} — {class_data['desc']}",
+            callback_data=f"zs_class_{class_id}"
+        )])
+    buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="menu_main")])
+    try:
+        await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    except Exception:
         try:
             await callback.message.delete()
         except Exception:
             pass
-        await callback.message.answer_photo(image.file_id, caption=text, reply_markup=main_menu(player, base))
-    else:
+        await callback.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+
+@router.callback_query(F.data.startswith("zs_class_"))
+async def cb_zs_class(callback: CallbackQuery, state: FSMContext):
+    class_id = callback.data.replace("zs_class_", "")
+    if class_id not in CLASSES:
+        await callback.answer("❌ Неверный класс.")
+        return
+    await state.update_data(player_class=class_id)
+    await state.set_state(ZSStates.entering_name)
+    class_data = CLASSES[class_id]
+    msg = await callback.message.edit_text(
+        f"Выбран класс: {class_data['name']}\n\n"
+        f"Введи имя своего персонажа:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="menu_zs")]
+        ])
+    )
+    await state.update_data(prompt_msg_id=msg.message_id)
+
+@router.message(ZSStates.entering_name)
+async def process_name(message: Message, state: FSMContext, user: User, session: AsyncSession):
+    data = await state.get_data()
+    await state.clear()
+    try:
+        await message.delete()
+    except Exception:
+        pass
+    if data.get("prompt_msg_id"):
         try:
-            await callback.message.edit_text(text, reply_markup=main_menu(player, base))
+            await message.bot.delete_message(message.chat.id, data["prompt_msg_id"])
         except Exception:
-            await callback.message.answer(text, reply_markup=main_menu(player, base))
+            pass
 
-@router.callback_query(F.data == "zs_time_info")
-async def cb_time_info(callback: CallbackQuery, user: User, session: AsyncSession):
-    player = await get_player(session, user.telegram_id)
-    is_day = is_daytime(player.game_time)
-    phase = "☀️ День" if is_day else "🌙 Ночь"
-    await callback.answer(f"{phase} | {format_time(player.game_time)} | День {player.day}")
+    name = message.text.strip()[:32]
+    player_class = data.get("player_class", "soldier")
 
-# ─── НОЧЬ ────────────────────────────────────────────────────────────────────
+    existing = await get_player(session, user.telegram_id)
+    if existing:
+        await delete_player(session, user.telegram_id)
 
-@router.callback_query(F.data == "zs_night")
-async def cb_night(callback: CallbackQuery, user: User, session: AsyncSession):
+    player = await create_player(session, user.telegram_id, name, player_class)
+    base = await get_base(session, user.telegram_id)
+    inventory = await get_inventory(session, user.telegram_id)
+    class_data = CLASSES[player_class]
+
+    text = (
+        f"✅ Добро пожаловать в апокалипсис, {name}!\n\n"
+        f"Класс: {class_data['name']}\n"
+        f"❤️ HP: {player.hp}/{player.hp_max}\n"
+        f"🍖 Голод: {player.hunger}/10\n"
+        f"🥫 Стартовая еда: 5\n\n"
+        f"Удачи. Она тебе понадобится."
+    )
+    hunger_bar = "🍖" * player.hunger + "⬛" * (10 - player.hunger)
+    await message.answer(
+        f"🧟 Зомби Выживание\n\n"
+        f"👤 {player.name} | {class_data['name']}\n"
+        f"❤️ HP: {player.hp}/{player.hp_max}\n"
+        f"{hunger_bar}\n"
+        f"🍖 Голод: {player.hunger}/10\n"
+        f"📅 День {player.day}\n\n"
+        f"✅ Персонаж создан! Удачи.",
+        reply_markup=main_menu(player, base)
+    )
+# ─── ИНВЕНТАРЬ ────────────────────────────────────────────────────────────────
+
+SLOT_NAMES = {
+    "helmet": "🪖 Шлем",
+    "armor": "👕 Броня",
+    "pants": "👖 Штаны",
+    "boots": "👟 Обувь",
+    "melee": "⚔️ Ближний бой",
+    "ranged": "🔫 Дальний бой",
+    "backpack": "🎒 Рюкзак",
+}
+
+async def show_inventory(callback: CallbackQuery, player: ZSPlayer, inventory: ZSInventory):
+    resources = inventory.resources or {}
+    text = "🎒 Инвентарь\n\n📦 Ресурсы:\n"
+    for res_id, res_data in RESOURCES.items():
+        amount = resources.get(res_id, 0)
+        if amount > 0:
+            text += f"  {res_data['name']}: {amount}\n"
+    if not any(resources.get(r, 0) > 0 for r in RESOURCES):
+        text += "  Пусто\n"
+
+    text += "\n🛡 Снаряжение:\n"
+    for slot, slot_name in SLOT_NAMES.items():
+        tier = getattr(inventory, f"{slot}_tier", 0)
+        item_name = EQUIPMENT[slot]["tiers"][tier]["name"]
+        if slot in ["melee", "ranged"]:
+            stat = EQUIPMENT[slot]["tiers"][tier].get("damage", 0)
+            text += f"  {slot_name}: {item_name} (урон: {stat})\n"
+        elif slot == "backpack":
+            stat = EQUIPMENT[slot]["tiers"][tier].get("slots", 5)
+            text += f"  {slot_name}: {item_name} ({stat} слотов)\n"
+        else:
+            stat = EQUIPMENT[slot]["tiers"][tier].get("defense", 0)
+            text += f"  {slot_name}: {item_name} (защита: {stat})\n"
+
+    buttons = [
+        [InlineKeyboardButton(text="🍖 Съесть еду", callback_data="zs_eat"),
+         InlineKeyboardButton(text="💊 Использовать медикамент", callback_data="zs_use_meds")],
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="zs_main")],
+    ]
+    try:
+        await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    except Exception:
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+        await callback.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+
+@router.callback_query(F.data == "zs_inventory")
+async def cb_inventory(callback: CallbackQuery, user: User, session: AsyncSession):
     player = await get_player(session, user.telegram_id)
     inventory = await get_inventory(session, user.telegram_id)
-    resources = inventory.resources or {}
-    food = resources.get("food", 0)
-    buttons = [
-        [InlineKeyboardButton(text="😴 Отдохнуть до утра", callback_data="zs_sleep")],
-        [InlineKeyboardButton(text="🏠 База", callback_data="zs_base")],
-        [InlineKeyboardButton(text="🎒 Инвентарь", callback_data="zs_inventory")],
-    ]
-    hunger = getattr(player, "hunger", 10)
-    if food > 0 and hunger < 10:
-        buttons.append([InlineKeyboardButton(text=f"🍖 Поесть (+2 голода) | Еда: {food}", callback_data="zs_eat")])
-    try:
-        await callback.message.edit_text(
-            f"🌙 Ночь — вылазки недоступны.\n\n"
-            f"❤️ HP: {player.hp}/{player.hp_max}\n"
-            f"🥫 Еда: {food}\n"
-            f"⏰ {format_time(player.game_time)}",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
-        )
-    except Exception:
-        await callback.message.answer(
-            f"🌙 Ночь — вылазки недоступны.",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
-        )
+    await show_inventory(callback, player, inventory)
 
 @router.callback_query(F.data == "zs_eat")
 async def cb_eat(callback: CallbackQuery, user: User, session: AsyncSession):
     player = await get_player(session, user.telegram_id)
     inventory = await get_inventory(session, user.telegram_id)
-    success = await eat_food(session, player, inventory)
-    if not success:
-        await callback.answer("❌ Нет еды!")
+    if player.hunger >= 10:
+        await callback.answer("🍖 Голод уже максимальный!")
         return
-    await callback.answer(f"🍖 +2 голода. Голод: {player.hunger}/10")
-    await cb_night(callback, user, session)
+    result = await eat_food(session, player, inventory)
+    if result:
+        await callback.answer(f"🍖 Голод: {player.hunger}/10")
+    else:
+        await callback.answer("❌ Еды нет!")
+    await show_inventory(callback, player, inventory)
 
-@router.callback_query(F.data == "zs_sleep")
-async def cb_sleep(callback: CallbackQuery, user: User, session: AsyncSession, state: FSMContext):
-    import random
+@router.callback_query(F.data == "zs_use_meds")
+async def cb_use_meds(callback: CallbackQuery, user: User, session: AsyncSession):
+    player = await get_player(session, user.telegram_id)
+    inventory = await get_inventory(session, user.telegram_id)
+    if player.hp >= player.hp_max:
+        await callback.answer("❤️ HP уже максимальное!")
+        return
+    result = await use_meds(session, player, inventory)
+    if result:
+        await callback.answer(f"💊 HP: {player.hp}/{player.hp_max}")
+    else:
+        await callback.answer("❌ Медикаментов нет!")
+    await show_inventory(callback, player, inventory)
+
+# ─── БАЗА ─────────────────────────────────────────────────────────────────────
+
+async def show_base(callback: CallbackQuery, player: ZSPlayer, base: ZSBase, inventory: ZSInventory):
+    text = f"🏠 База | День {player.day}\n\n"
+    for building_id, building_data in BUILDINGS.items():
+        level = getattr(base, building_id, 0)
+        text += f"{building_data['name']}: ур.{level}/5\n"
+        if level > 0:
+            if building_id == "shelter":
+                text += f"  +{BUILDINGS[building_id]['levels'][level]['hp_bonus']} макс HP\n"
+            elif building_id == "workshop":
+                text += f"  Крафт до тир {BUILDINGS[building_id]['levels'][level]['craft_tier']}\n"
+            elif building_id == "garden":
+                text += f"  +{BUILDINGS[building_id]['levels'][level]['food_per_day']} еды утром\n"
+            elif building_id == "medpost":
+                text += f"  +{BUILDINGS[building_id]['levels'][level]['heal_per_day']} HP утром\n"
+            elif building_id == "watchtower":
+                text += f"  Информация о локациях\n"
+            elif building_id == "defense":
+                text += f"  -{BUILDINGS[building_id]['levels'][level]['damage_reduction']}% урона орды\n"
+
+    buttons = []
+    for building_id, building_data in BUILDINGS.items():
+        level = getattr(base, building_id, 0)
+        if level < 5:
+            next_level = level + 1
+            cost = BUILDINGS[building_id]["levels"][next_level]["cost"]
+            cost_str = ", ".join([f"{RESOURCES[r]['name'].split()[-1]} x{a}" for r, a in cost.items()])
+            buttons.append([InlineKeyboardButton(
+                text=f"🔨 {building_data['name']} ур.{next_level} ({cost_str})",
+                callback_data=f"zs_build_{building_id}"
+            )])
+    buttons.append([InlineKeyboardButton(text="🔧 Крафт снаряжения", callback_data="zs_craft")])
+    buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="zs_main")])
+
+    try:
+        await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    except Exception:
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+        await callback.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+
+@router.callback_query(F.data == "zs_base")
+async def cb_base(callback: CallbackQuery, user: User, session: AsyncSession):
     player = await get_player(session, user.telegram_id)
     base = await get_base(session, user.telegram_id)
+    inventory = await get_inventory(session, user.telegram_id)
+    await show_base(callback, player, base, inventory)
 
-    if player.game_time >= 360:
-        minutes_until_morning = (1440 - player.game_time) + 360
-    else:
-        minutes_until_morning = 360 - player.game_time
+@router.callback_query(F.data.startswith("zs_build_"))
+async def cb_build(callback: CallbackQuery, user: User, session: AsyncSession):
+    building_id = callback.data.replace("zs_build_", "")
+    player = await get_player(session, user.telegram_id)
+    base = await get_base(session, user.telegram_id)
+    inventory = await get_inventory(session, user.telegram_id)
+    success, msg = await upgrade_building(session, base, inventory, building_id)
+    await callback.answer(msg)
+    await show_base(callback, player, base, inventory)
 
-    await advance_time(session, player, minutes_until_morning)
-    await reduce_hunger(session, player, 1)
+# ─── КРАФТ ────────────────────────────────────────────────────────────────────
 
-    import random as _r
+@router.callback_query(F.data == "zs_craft")
+async def cb_craft(callback: CallbackQuery, user: User, session: AsyncSession):
+    base = await get_base(session, user.telegram_id)
+    workshop_level = base.workshop or 0
+    player = await get_player(session, user.telegram_id)
+    class_data = CLASSES.get(player.player_class or "soldier", CLASSES["soldier"])
 
-    if player.day <= 3:
-        zombie_hp_range = (20, 35)
-        night_damage = (5, 10)
-    elif player.day <= 7:
-        zombie_hp_range = (35, 55)
-        night_damage = (10, 18)
-    elif player.day <= 15:
-        zombie_hp_range = (55, 80)
-        night_damage = (15, 25)
-    else:
-        zombie_hp_range = (80, 120)
-        night_damage = (20, 35)
-
-    dmg_min = night_damage[0]
-    dmg_max = night_damage[1]
-
-    base_attack_chance = max(10, 50 - base.defense_level * 10)
-    attacked = _r.randint(1, 100) <= base_attack_chance
-
-    if attacked:
-        await add_event(session, user.telegram_id, player.day, "night", "🧟 Ночью напала орда зомби!")
-        await state.set_state(ZSStates.night_attack)
-        zombie_hp = _r.randint(*zombie_hp_range)
-        zombie_hp_max = zombie_hp
-        hp_bar = "🟥" * 10
-        attack_text = (
-            f"🌙 Ночью на базу напала орда зомби!\n\n"
-            f"❤️ HP: {player.hp}/{player.hp_max}\n\n"
-            f"🧟 Орда {hp_bar} {zombie_hp}/{zombie_hp_max}\n"
-            f"Отбивайся!"
-        )
-        buttons = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="⚔️ Ближний бой", callback_data=f"zs_night_fight_melee_{zombie_hp}_{zombie_hp_max}_{dmg_min}_{dmg_max}")],
-            [InlineKeyboardButton(text="🔫 Стрелять",    callback_data=f"zs_night_fight_ranged_{zombie_hp}_{zombie_hp_max}_{dmg_min}_{dmg_max}")],
-        ])
-        image = await get_image(session, "night_attack")
-        if image:
-            try:
-                await callback.message.delete()
-            except Exception:
-                pass
-            await callback.message.answer_photo(image.file_id, caption=attack_text, reply_markup=buttons)
-        else:
-            try:
-                await callback.message.edit_text(attack_text, reply_markup=buttons)
-            except Exception:
-                await callback.message.answer(attack_text, reply_markup=buttons)
+    text = "🔧 Крафт снаряжения\n\n"
+    if workshop_level == 0 and not class_data.get("can_craft_t3_without_workshop"):
+        text += "Нужна мастерская для крафта!"
+        await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="zs_base")]
+        ]))
         return
 
-    # Нападения не было — лечение медпунктом и утро
-    buildings = base.buildings or {}
-    medpost_level = buildings.get("medpost", 0)
-    heal_amount = 0
-    if medpost_level > 0:
-        heal_amount = [10, 25, 50][medpost_level - 1]
+    max_tier = workshop_level
+    if class_data.get("can_craft_t3_without_workshop"):
+        max_tier = max(max_tier, 3)
 
-    old_hp = player.hp
-    player.hp = min(player.hp_max, player.hp + heal_amount)
-    actual_heal = player.hp - old_hp
-    await session.commit()
+    text += f"Доступный тир крафта: до тир {max_tier}\n\n"
 
-    # Результаты вылазок НПС
-    npc_results = await return_npcs(session, player)
-    npc_text = ""
-    if npc_results["returned"]:
-        npc_text += "\n\n👥 Выжившие вернулись:\n"
-        for r in npc_results["returned"]:
-            if r["resources"]:
-                res_list = ", ".join([f"{RESOURCES[res]['name'].split()[-1]} x{amt}" for res, amt in r["resources"].items()])
-                npc_text += f"  ✅ {r['name']}: {res_list}\n"
-            else:
-                npc_text += f"  ✅ {r['name']}: ничего не нашёл\n"
-            if r.get("leveled_up"):
-                level_data = get_npc_level_data(r["level"])
-                npc_text += f"  🎉 {r['name']} повысил уровень до {r['level']} ({level_data['name']})!\n"
-    if npc_results["died"]:
-        npc_text += "\n💀 Погибли на задании:\n"
-        for name in npc_results["died"]:
-            npc_text += f"  ❌ {name}\n"
+    buttons = []
+    for slot, slot_data in EQUIPMENT.items():
+        buttons.append([InlineKeyboardButton(
+            text=f"{slot_data['name']}",
+            callback_data=f"zs_craft_slot_{slot}"
+        )])
+    buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="zs_base")])
 
-    new_base = await get_base(session, user.telegram_id)
+    try:
+        await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    except Exception:
+        await callback.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
 
-    hunger = getattr(player, "hunger", 10)
-    if hunger == 0:
-        hunger_icon = "💀"
-    elif hunger <= 3:
-        hunger_icon = "⚠️"
-    else:
-        hunger_icon = "🍖"
-    hunger_bar = "🍖" * hunger + "⬛" * (10 - hunger)
-    text = "😴 Ты отдохнул до утра.\n"
-    if heal_amount > 0:
-        text += f"❤️ Восстановлено: +{actual_heal} HP\n"
-    text += f"\n❤️ HP: {player.hp}/{player.hp_max}\n"
-    text += f"{hunger_bar}\n"
-    text += f"{hunger_icon} Голод: {hunger}/10\n"
-    text += f"📅 День {player.day}"
-    text += npc_text
-
-    import random as _rand
-    tip = _rand.choice(TIPS)
-    text += f"\n\n✅ Ночь прошла спокойно.\n\n💡 Совет дня: {tip}"
-    image = await get_image(session, f"base_{new_base.level}")
-    if image:
-        try:
-            await callback.message.delete()
-        except Exception:
-            pass
-        await callback.message.answer_photo(image.file_id, caption=text, reply_markup=main_menu(player, new_base))
-    else:
-        try:
-            await callback.message.edit_text(text, reply_markup=main_menu(player, new_base))
-        except Exception:
-            await callback.message.answer(text, reply_markup=main_menu(player, new_base))
-
-async def handle_victory(callback: CallbackQuery, player: ZSPlayer, session: AsyncSession):
-    text = (
-        "🎉 ПОБЕДА!\n\n"
-        "Учёные Великой Крокожии разработали вакцину!\n"
-        "Вертолёты уже летят к тебе.\n\n"
-        f"📊 Статистика:\n"
-        f"📅 Дней выжито: {player.day}\n"
-        f"❤️ HP: {player.hp}/{player.hp_max}\n\n"
-        "Ты выжил. Ты победил."
-    )
-    image = await get_image(session, "finale")
-    buttons = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔄 Играть снова", callback_data="zs_restart")]
-    ])
-    if image:
-        try:
-            await callback.message.delete()
-        except Exception:
-            pass
-        await callback.message.answer_photo(image.file_id, caption=text, reply_markup=buttons)
-    else:
-        await callback.message.answer(text, reply_markup=buttons)
-
-# ─── РАДИО ───────────────────────────────────────────────────────────────────
-
-@router.callback_query(F.data == "zs_radio")
-async def cb_radio(callback: CallbackQuery, user: User, session: AsyncSession):
+@router.callback_query(F.data.startswith("zs_craft_slot_"))
+async def cb_craft_slot(callback: CallbackQuery, user: User, session: AsyncSession):
+    slot = callback.data.replace("zs_craft_slot_", "")
     player = await get_player(session, user.telegram_id)
-    msg = RADIO_MESSAGES.get(player.day, "📻 Помехи в эфире...")
-    image = await get_image(session, "radio")
-    if image:
-        try:
-            await callback.message.delete()
-        except Exception:
-            pass
-        await callback.message.answer_photo(image.file_id, caption=msg, reply_markup=back_button("zs_main"))
-    else:
-        try:
-            await callback.message.edit_text(msg, reply_markup=back_button("zs_main"))
-        except Exception:
-            await callback.message.answer(msg, reply_markup=back_button("zs_main"))
+    base = await get_base(session, user.telegram_id)
+    inventory = await get_inventory(session, user.telegram_id)
+    class_data = CLASSES.get(player.player_class or "soldier", CLASSES["soldier"])
 
-# ─── ВЫЛАЗКИ ─────────────────────────────────────────────────────────────────
+    workshop_level = base.workshop or 0
+    max_tier = workshop_level
+    if class_data.get("can_craft_t3_without_workshop"):
+        max_tier = max(max_tier, 3)
+
+    current_tier = getattr(inventory, f"{slot}_tier", 0)
+    slot_data = EQUIPMENT[slot]
+
+    text = f"{slot_data['name']}\nТекущий: {slot_data['tiers'][current_tier]['name']}\n\n"
+    buttons = []
+    for tier in range(1, 6):
+        if tier > max_tier:
+            break
+        tier_data = slot_data["tiers"][tier]
+        cost = tier_data.get("craft", {})
+        if not cost:
+            continue
+        cost_str = ", ".join([f"{RESOURCES[r]['name'].split()[-1]} x{a}" for r, a in cost.items()])
+        if slot in ["melee", "ranged"]:
+            stat = f"урон {tier_data.get('damage', 0)}"
+        elif slot == "backpack":
+            stat = f"{tier_data.get('slots', 5)} слотов"
+        else:
+            stat = f"защита {tier_data.get('defense', 0)}"
+        buttons.append([InlineKeyboardButton(
+            text=f"Тир {tier}: {tier_data['name']} ({stat}) — {cost_str}",
+            callback_data=f"zs_craft_item_{slot}_{tier}"
+        )])
+    buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="zs_craft")])
+
+    try:
+        await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    except Exception:
+        await callback.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+
+@router.callback_query(F.data.startswith("zs_craft_item_"))
+async def cb_craft_item(callback: CallbackQuery, user: User, session: AsyncSession):
+    parts = callback.data.replace("zs_craft_item_", "").rsplit("_", 1)
+    slot = parts[0]
+    tier = int(parts[1])
+    player = await get_player(session, user.telegram_id)
+    base = await get_base(session, user.telegram_id)
+    inventory = await get_inventory(session, user.telegram_id)
+    success, msg = await craft_equipment(session, inventory, player, base, slot, tier)
+    await callback.answer(msg)
+    await cb_craft_slot(callback, user, session)
+# ─── ВЫЛАЗКА ──────────────────────────────────────────────────────────────────
 
 @router.callback_query(F.data == "zs_raid")
 async def cb_raid(callback: CallbackQuery, user: User, session: AsyncSession):
     player = await get_player(session, user.telegram_id)
-    if not is_daytime(player.game_time):
-        await callback.answer("🌙 Ночью вылазки недоступны.")
-        return
-
     base = await get_base(session, user.telegram_id)
-    watchtower = (base.buildings or {}).get("watchtower", 0)
+    watchtower = base.watchtower or 0
 
     text = "🗺 Выбери локацию для вылазки:\n\n"
     text += "🟢 Тир 1 | 🟡 Тир 2 | 🔴 Тир 3\n\n"
 
-    slot_names_ru = {
-        "helmet": "Шлем", "armor": "Броня", "pants": "Штаны",
-        "boots": "Обувь", "melee": "Ближнее оружие", "ranged": "Дальнее оружие", "backpack": "Рюкзак"
-    }
     for loc_id, loc in LOCATIONS.items():
         tier_icon = {"1": "🟢", "2": "🟡", "3": "🔴"}.get(str(loc["tier"]), "⚪")
-        text += f"{tier_icon} {loc['name']} ({loc['time_cost'] // 60}ч)\n"
+        time_h = loc["time_cost"] // 60
+        text += f"{tier_icon} {loc['name']} ({time_h}ч)\n"
         if watchtower >= 1:
             res_names = ", ".join([RESOURCES[r]["name"].split()[-1] for r in loc["resources"]])
             text += f"   Ресурсы: {res_names}\n"
-            if loc.get("loot"):
-                loot_names = ", ".join([slot_names_ru.get(l['slot'], l['slot']) for l in loc["loot"]])
-                text += f"   Снаряжение: {loot_names}\n"
         if watchtower >= 2:
             text += f"   Шанс зомби: {loc['zombie_chance']}%\n"
         if watchtower >= 3:
@@ -426,867 +455,298 @@ async def cb_raid(callback: CallbackQuery, user: User, session: AsyncSession):
     try:
         await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
     except Exception:
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
         await callback.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
 
-@router.callback_query(F.data.startswith("zs_raid_"), lambda c: len(c.data.split("_")) <= 3)
+@router.callback_query(F.data.startswith("zs_raid_"))
 async def cb_raid_location(callback: CallbackQuery, user: User, session: AsyncSession):
-    import random
     loc_id = callback.data.replace("zs_raid_", "")
-    loc = LOCATIONS.get(loc_id)
-    if not loc:
+    if loc_id not in LOCATIONS:
         await callback.answer("❌ Локация не найдена.")
         return
 
     player = await get_player(session, user.telegram_id)
     inventory = await get_inventory(session, user.telegram_id)
-    equipment = dict(inventory.equipment or {})
-    backpack_slots = get_backpack_slots(equipment)
+    base = await get_base(session, user.telegram_id)
 
-    await advance_time(session, player, loc["time_cost"])
-    hunger_cost = loc["tier"]
-    await reduce_hunger(session, player, hunger_cost)
+    if player.hunger == 0:
+        await callback.answer("⚠️ Голод на нуле! Съешь еду перед вылазкой.")
 
-    encountered_zombies = []
-    zombie_chance = loc["zombie_chance"]
-    max_zombies = loc["max_zombies"]
+    result = await start_raid(session, player, inventory, loc_id)
+    scenario = result["scenario"]
 
-    for i in range(max_zombies):
-        if i == 0:
-            if random.randint(1, 100) <= zombie_chance:
-                hp = random.randint(*loc["zombie_hp"])
-                encountered_zombies.append(hp)
-        else:
-            extra_chance = zombie_chance - (i * 20)
-            if extra_chance > 0 and random.randint(1, 100) <= extra_chance:
-                hp = random.randint(*loc["zombie_hp"])
-                encountered_zombies.append(hp)
-
-    npc_found = random.randint(1, 100) <= loc["npc_chance"]
-
-    if encountered_zombies:
-        zombie_hp = encountered_zombies[0]
-        zombie_hp_max = zombie_hp
-        remaining = len(encountered_zombies) - 1
-        hp_bar = "🟥" * 10
-        text = (
-            f"🗺 Вылазка: {loc['name']}\n\n"
-            f"🧟 Зомби {hp_bar} {zombie_hp}/{zombie_hp_max}\n"
-            f"❤️ Ты: {player.hp}/{player.hp_max}\n"
-        )
-        if remaining > 0:
-            text += f"⚠️ Ещё зомби впереди: {remaining}\n"
-        if npc_found:
-            text += "\n👤 Вдали виден выживший!\n"
-        text += "\nЗомби преградил путь!"
-
-        extra = f"_npc" if npc_found else "_nonpc"
-        extra += f"_rem{remaining}"
-
-        buttons = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="⚔️ Ближний бой", callback_data=f"zs_fight_melee_{loc_id}_{zombie_hp}_{zombie_hp_max}_0{extra}")],
-            [InlineKeyboardButton(text="🔫 Стрелять",    callback_data=f"zs_fight_ranged_{loc_id}_{zombie_hp}_{zombie_hp_max}_0{extra}")],
-            [InlineKeyboardButton(text="🏃 Убежать",     callback_data=f"zs_fight_run_{loc_id}_{zombie_hp}_{zombie_hp_max}_0{extra}")],
-        ])
-
-        image = await get_image(session, f"zombie_{loc['tier']}")
-        if image:
-            try:
-                await callback.message.delete()
-            except Exception:
-                pass
-            await callback.message.answer_photo(image.file_id, caption=text, reply_markup=buttons)
-        else:
-            try:
-                await callback.message.edit_text(text, reply_markup=buttons)
-            except Exception:
-                await callback.message.answer(text, reply_markup=buttons)
-    else:
-        found_resources = {}
-        for res_id, res_data in loc["resources"].items():
-            if random.randint(1, 100) <= res_data["chance"]:
-                amount = min(
-                    random.randint(res_data["min"], res_data["max"]),
-                    backpack_slots - sum(found_resources.values())
-                )
-                if amount > 0:
-                    found_resources[res_id] = amount
-                if sum(found_resources.values()) >= backpack_slots:
-                    break
-
-        if found_resources:
-            await add_resources(session, inventory, found_resources)
-
-        eq = dict(inventory.equipment or {})
-        found_equip = []
-        for loot in loc.get("loot", []):
-            slot = loot["slot"]
-            tier = loot["tier"]
-            if eq.get(slot, 0) == 0 and random.randint(1, 100) <= loot["chance"]:
-                eq[slot] = tier
-                item = get_equipment_item(slot, tier)
-                found_equip.append(item.get("name", slot))
-        if found_equip:
-            inventory.equipment = eq
-            await session.commit()
-
-        if npc_found:
-            npc = await add_npc(session, user.telegram_id)
-            npc_text = f"\n\n👤 Найден выживший: {npc.name}!" if npc else "\n\n👤 База переполнена, нет места для выжившего."
-        else:
-            npc_text = ""
-
-        res_text = ""
-        if found_resources:
-            res_text = "\n\n📦 Найдено:\n"
-            for res_id, amount in found_resources.items():
-                res_text += f"  {RESOURCES[res_id]['name']}: {amount}\n"
-            if sum(found_resources.values()) >= backpack_slots:
-                res_text += "  🎒 Рюкзак полон!\n"
-        else:
-            res_text = "\n\n📦 Ничего не найдено."
-
-        loot_text = ""
-        if found_equip:
-            loot_text = "\n🎁 Найдено снаряжение:\n"
-            for item_name in found_equip:
-                loot_text += f"  ✨ {item_name}\n"
-
-        await add_event(session, user.telegram_id, player.day,
-            "raid", f"🗺 Вылазка в {loc['name']} — без зомби.{res_text.replace(chr(10), ' ')}")
-        text = (
-            f"🗺 Вылазка: {loc['name']}\n\n"
-            f"✅ Всё спокойно.{res_text}{loot_text}{npc_text}\n\n"
-            f"❤️ {player.hp}/{player.hp_max}"
-        )
-        buttons = [[InlineKeyboardButton(text="◀️ На базу", callback_data="zs_main")]]
-        try:
-            await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
-        except Exception:
-            await callback.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
-
-# ─── БОЙ ─────────────────────────────────────────────────────────────────────
-
-@router.callback_query(F.data.startswith("zs_fight_"))
-async def cb_fight(callback: CallbackQuery, user: User, session: AsyncSession):
-    import random
-    parts = callback.data.split("_")
-    action = parts[2]
-
-    data_part = callback.data.replace(f"zs_fight_{action}_", "")
-    has_npc = "_npc" in data_part
-    data_part = data_part.replace("_npc", "").replace("_nonpc", "")
-
-    remaining_zombies = 0
-    if "_rem" in data_part:
-        rem_idx = data_part.index("_rem")
-        remaining_zombies = int(data_part[rem_idx + 4:])
-        data_part = data_part[:rem_idx]
-
-    num_parts = data_part.split("_")
-    zombie_hp = int(num_parts[-3])
-    zombie_hp_max = int(num_parts[-2])
-    loc_id = "_".join(num_parts[:-3])
-
-    loc = LOCATIONS.get(loc_id, {})
-    player = await get_player(session, user.telegram_id)
-    inventory = await get_inventory(session, user.telegram_id)
-    equipment = inventory.equipment or {}
-    backpack_slots = get_backpack_slots(equipment)
-
-    zombie_damage_range = loc.get("zombie_damage", (10, 20))
-    damage_taken = 0
-    victory = False
-    fled = False
-    result_text = ""
-
-    if action == "melee":
-        melee_tier = equipment.get("melee", 0)
-        melee_item = get_equipment_item("melee", melee_tier)
-        player_damage = melee_item.get("damage", 5)
-        zombie_hp -= player_damage
-        if zombie_hp <= 0:
-            victory = True
-            result_text = f"⚔️ Удар! ({player_damage} урона) — Зомби убит!"
-        else:
-            damage_taken = random.randint(*zombie_damage_range)
-            result_text = f"⚔️ Удар! ({player_damage} урона) — Зомби контратакует!"
-
-    elif action == "ranged":
-        ranged_tier = equipment.get("ranged", 0)
-        if ranged_tier == 0:
-            damage_taken = random.randint(*zombie_damage_range)
-            result_text = "🔫 Нет оружия дальнего боя!"
-        else:
-            ranged_item = get_equipment_item("ranged", ranged_tier)
-            ammo_cost = ranged_item.get("ammo_cost", 0)
-            resources = dict(inventory.resources or {})
-            if ammo_cost > 0 and resources.get("ammo", 0) < ammo_cost:
-                damage_taken = random.randint(*zombie_damage_range)
-                result_text = "🔫 Нет патронов!"
-            else:
-                if ammo_cost > 0:
-                    resources["ammo"] -= ammo_cost
-                    inventory.resources = resources
-                player_damage = ranged_item.get("damage", 0)
-                zombie_hp -= player_damage
-                if zombie_hp <= 0:
-                    victory = True
-                    result_text = f"🔫 Выстрел! ({player_damage} урона) — Зомби убит!"
-                else:
-                    damage_taken = random.randint(0, zombie_damage_range[1] // 2)
-                    result_text = f"🔫 Выстрел! ({player_damage} урона) — Зомби ещё жив!"
-
-    else:  # run
-        fled = True
-        result_text = "🏃 Ты убежал! Лут не получен."
-
-    defense = get_total_defense(equipment)
-    actual_damage = max(0, damage_taken - defense // 5)
-    player.hp = max(0, player.hp - actual_damage)
-    await session.commit()
-
-    damage_text = ""
-    if actual_damage > 0:
-        absorbed = damage_taken - actual_damage
-        damage_text = f"\n💥 Урон: {actual_damage}"
-        if absorbed > 0:
-            damage_text += f" (🛡 поглощено {absorbed})"
-
-    if player.hp <= 0:
-        player.is_alive = False
-        await session.commit()
-        text = f"{result_text}{damage_text}\n\n💀 Ты погиб. Игра окончена."
-        image = await get_image(session, "death")
-        if image:
-            try:
-                await callback.message.delete()
-            except Exception:
-                pass
-            await callback.message.answer_photo(image.file_id, caption=text, reply_markup=dead_menu())
-        else:
-            try:
-                await callback.message.edit_text(text, reply_markup=dead_menu())
-            except Exception:
-                await callback.message.answer(text, reply_markup=dead_menu())
+    if not scenario:
+        await callback.answer("❌ Сценарий не найден.")
         return
 
-    if fled:
-        text = f"{result_text}\n\n❤️ {player.hp}/{player.hp_max}"
-        buttons = [[InlineKeyboardButton(text="◀️ На базу", callback_data="zs_main")]]
-        try:
-            await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
-        except Exception:
-            await callback.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
-        return
+    text = f"🗺 {LOCATIONS[loc_id]['name']}\n\n{scenario['intro']}\n\nЧто делаешь?"
+    buttons = []
+    for opt in scenario["options"]:
+        buttons.append([InlineKeyboardButton(
+            text=opt["button"],
+            callback_data=f"zs_option_{loc_id}_{opt['type']}"
+        )])
 
-    if not victory:
-        zombie_hp = max(0, zombie_hp)
-        filled = zombie_hp * 10 // zombie_hp_max
-        hp_bar = "🟥" * filled + "⬛" * (10 - filled)
-        text = (
-            f"🧟 Зомби {hp_bar} {zombie_hp}/{zombie_hp_max}\n"
-            f"❤️ Ты: {player.hp}/{player.hp_max}\n\n"
-            f"{result_text}{damage_text}"
-        )
-        extra = "_npc" if has_npc else "_nonpc"
-        extra += f"_rem{remaining_zombies}"
-        buttons = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="⚔️ Ближний бой", callback_data=f"zs_fight_melee_{loc_id}_{zombie_hp}_{zombie_hp_max}_0{extra}")],
-            [InlineKeyboardButton(text="🔫 Стрелять",    callback_data=f"zs_fight_ranged_{loc_id}_{zombie_hp}_{zombie_hp_max}_0{extra}")],
-            [InlineKeyboardButton(text="🏃 Убежать",     callback_data=f"zs_fight_run_{loc_id}_{zombie_hp}_{zombie_hp_max}_0{extra}")],
-        ])
-        try:
-            await callback.message.edit_text(text, reply_markup=buttons)
-        except Exception:
-            await callback.message.answer(text, reply_markup=buttons)
-        return
-
-    # Победа!
-    if remaining_zombies > 0:
-        next_zombie_hp = random.randint(*loc.get("zombie_hp", (20, 40)))
-        hp_bar = "🟥" * 10
-        text = (
-            f"{result_text}{damage_text}\n\n"
-            f"⚠️ Следующий зомби!\n\n"
-            f"🧟 Зомби {hp_bar} {next_zombie_hp}/{next_zombie_hp}\n"
-            f"❤️ Ты: {player.hp}/{player.hp_max}"
-        )
-        extra = "_npc" if has_npc else "_nonpc"
-        extra += f"_rem{remaining_zombies - 1}"
-        buttons = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="⚔️ Ближний бой", callback_data=f"zs_fight_melee_{loc_id}_{next_zombie_hp}_{next_zombie_hp}_0{extra}")],
-            [InlineKeyboardButton(text="🔫 Стрелять",    callback_data=f"zs_fight_ranged_{loc_id}_{next_zombie_hp}_{next_zombie_hp}_0{extra}")],
-            [InlineKeyboardButton(text="🏃 Убежать",     callback_data=f"zs_fight_run_{loc_id}_{next_zombie_hp}_{next_zombie_hp}_0{extra}")],
-        ])
-        try:
-            await callback.message.edit_text(text, reply_markup=buttons)
-        except Exception:
-            await callback.message.answer(text, reply_markup=buttons)
-        return
-
-    # Все зомби убиты — выдаём лут
-    found_resources = {}
-    for res_id, res_data in loc.get("resources", {}).items():
-        if random.randint(1, 100) <= res_data["chance"]:
-            amount = min(
-                random.randint(res_data["min"], res_data["max"]),
-                backpack_slots - sum(found_resources.values())
-            )
-            if amount > 0:
-                found_resources[res_id] = amount
-            if sum(found_resources.values()) >= backpack_slots:
-                break
-
-    if found_resources:
-        await add_resources(session, inventory, found_resources)
-
-    eq = dict(inventory.equipment or {})
-    found_equip = []
-    for loot in loc.get("loot", []):
-        slot = loot["slot"]
-        tier = loot["tier"]
-        if eq.get(slot, 0) == 0 and random.randint(1, 100) <= loot["chance"]:
-            eq[slot] = tier
-            item = get_equipment_item(slot, tier)
-            found_equip.append(item.get("name", slot))
-    if found_equip:
-        inventory.equipment = eq
-        await session.commit()
-
-    npc_text = ""
-    if has_npc:
-        npc = await add_npc(session, user.telegram_id)
-        npc_text = f"\n\n👤 Спасён выживший: {npc.name}!" if npc else "\n\n👤 База переполнена!"
-
-    loot_text = ""
-    if found_resources:
-        loot_text = "\n\n📦 Ресурсы:\n"
-        for res_id, amount in found_resources.items():
-            loot_text += f"  {RESOURCES[res_id]['name']}: {amount}\n"
-    else:
-        loot_text = "\n\n📦 Ресурсов не найдено."
-    if found_equip:
-        loot_text += "\n🎁 Снаряжение:\n"
-        for item_name in found_equip:
-            loot_text += f"  ✨ {item_name}\n"
-
-    text = (
-        f"🧟 Все зомби повержены!\n\n"
-        f"{result_text}{damage_text}"
-        f"{loot_text}{npc_text}\n\n"
-        f"❤️ {player.hp}/{player.hp_max}"
-    )
-    buttons = [[InlineKeyboardButton(text="◀️ На базу", callback_data="zs_main")]]
-    image = await get_image(session, "victory")
-    if image:
+    try:
+        await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    except Exception:
         try:
             await callback.message.delete()
         except Exception:
             pass
-        await callback.message.answer_photo(image.file_id, caption=text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
-    else:
+        await callback.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+
+@router.callback_query(F.data.startswith("zs_option_"))
+async def cb_raid_option(callback: CallbackQuery, user: User, session: AsyncSession):
+    parts = callback.data.replace("zs_option_", "").split("_", 1)
+    loc_id = parts[0]
+    option_type = parts[1]
+
+    player = await get_player(session, user.telegram_id)
+    inventory = await get_inventory(session, user.telegram_id)
+    base = await get_base(session, user.telegram_id)
+
+    # Получаем сценарий заново чтобы найти нужный вариант
+    scenario = await get_random_scenario(session, loc_id)
+    option = next((o for o in scenario["options"] if o["type"] == option_type), None)
+    if not option:
+        await callback.answer("❌ Вариант не найден.")
+        return
+
+    result = await process_raid_option(session, player, inventory, base, loc_id, option)
+
+    if result["type"] == "fight":
+        # Показываем бой
+        zombie_hp = result["zombie_hp"]
+        zombie_hp_max = result["zombie_hp_max"]
+        zombie_damage = result["zombie_damage"]
+        is_combat_loot = result.get("is_combat_loot", False)
+        filled = zombie_hp * 10 // zombie_hp_max
+        hp_bar = "🟥" * filled + "⬛" * (10 - filled)
+        player_defense = await get_player_defense(inventory)
+        melee_damage = await get_player_melee_damage(inventory, player)
+        ranged_damage = await get_player_ranged_damage(inventory, player)
+
+        text = (
+            f"🧟 Зомби {hp_bar} {zombie_hp}/{zombie_hp_max}\n"
+            f"❤️ Ты: {player.hp}/{player.hp_max}\n\n"
+            f"{result['text']}\n\n"
+            f"⚔️ Твой урон: {melee_damage} | 🔫 {ranged_damage}\n"
+            f"🛡 Защита: {player_defense}"
+        )
+        combat_data = f"{loc_id}_{zombie_hp}_{zombie_hp_max}_{zombie_damage}_{1 if is_combat_loot else 0}"
+        buttons = [
+            [InlineKeyboardButton(text="⚔️ Атаковать", callback_data=f"zs_fight_melee_{combat_data}")],
+            [InlineKeyboardButton(text="🔫 Стрелять", callback_data=f"zs_fight_ranged_{combat_data}")],
+            [InlineKeyboardButton(text="🏃 Убежать", callback_data=f"zs_fight_flee_{combat_data}")],
+        ]
         try:
             await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
         except Exception:
             await callback.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+        return
 
-# ─── НОЧНОЙ БОЙ ─────────────────────────────────────────────────────────────
+    if result["type"] == "leave":
+        text = f"{result['text']}\n\n+1 голод восстановлен."
+        hunger = player.hunger
+        hunger_bar = "🍖" * hunger + "⬛" * (10 - hunger)
+        text += f"\n{hunger_bar} Голод: {hunger}/10"
+        await callback.message.edit_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="◀️ На базу", callback_data="zs_main")]
+            ])
+        )
+        return
 
-@router.callback_query(F.data.startswith("zs_night_fight_"))
-async def cb_night_fight(callback: CallbackQuery, user: User, session: AsyncSession, state: FSMContext):
-    import random
-    parts = callback.data.replace("zs_night_fight_", "").split("_")
-    action = parts[0]
-    zombie_hp = int(parts[-4])
-    zombie_hp_max = int(parts[-3])
-    dmg_min = int(parts[-2])
-    dmg_max = int(parts[-1])
+    if result["type"] == "npc":
+        text = f"{result['text']}\n\n"
+        if result.get("npc"):
+            text += f"👤 {result['npc'].name} присоединился к твоей базе!\n"
+        elif not result.get("has_space"):
+            text += "На базе нет места для новых выживших.\n"
+        if result.get("resources"):
+            res_list = ", ".join([f"{RESOURCES[r]['name'].split()[-1]} x{a}" for r, a in result["resources"].items()])
+            text += f"📦 Получено: {res_list}"
+        await callback.message.edit_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="◀️ На базу", callback_data="zs_main")]
+            ])
+        )
+        return
+
+    if result["type"] == "empty":
+        text = f"{result['text']}\n\nНичего не нашёл."
+        await callback.message.edit_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="◀️ На базу", callback_data="zs_main")]
+            ])
+        )
+        return
+
+    if result["type"] == "loot":
+        text = f"{result['text']}\n\n"
+        if result.get("resources"):
+            res_list = ", ".join([f"{RESOURCES[r]['name'].split()[-1]} x{a}" for r, a in result["resources"].items()])
+            text += f"📦 Найдено: {res_list}"
+        else:
+            text += "Ничего не нашёл."
+        await callback.message.edit_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="◀️ На базу", callback_data="zs_main")]
+            ])
+        )
+        return
+
+# ─── БОЙ ──────────────────────────────────────────────────────────────────────
+
+async def process_fight(callback: CallbackQuery, user: User, session: AsyncSession, action: str, combat_data: str):
+    parts = combat_data.split("_")
+    loc_id = parts[0]
+    zombie_hp = int(parts[1])
+    zombie_hp_max = int(parts[2])
+    zombie_damage = int(parts[3])
+    is_combat_loot = parts[4] == "1"
 
     player = await get_player(session, user.telegram_id)
     inventory = await get_inventory(session, user.telegram_id)
-    base = await get_base(session, user.telegram_id)
-    equipment = inventory.equipment or {}
+    player_defense = await get_player_defense(inventory)
+    melee_damage = await get_player_melee_damage(inventory, player)
+    ranged_damage = await get_player_ranged_damage(inventory, player)
 
-    zombie_damage_range = (dmg_min, dmg_max)
-    damage_taken = 0
-    victory = False
     result_text = ""
 
+    if action == "flee":
+        # Шанс получить урон при побеге
+        if _r.randint(1, 100) <= 50:
+            dmg = max(1, zombie_damage - player_defense)
+            player.hp = max(0, player.hp - dmg)
+            await session.commit()
+            result_text = f"🏃 Убегаешь! Зомби достал тебя — -{dmg} HP."
+        else:
+            result_text = "🏃 Успешно убежал!"
+
+        if player.hp <= 0:
+            await delete_player(session, user.telegram_id)
+            await callback.message.edit_text(
+                "💀 Ты погиб при побеге!\n\nИгра окончена.",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="🔄 Начать заново", callback_data="menu_zs")]
+                ])
+            )
+            return
+
+        hunger = player.hunger
+        hunger_bar = "🍖" * hunger + "⬛" * (10 - hunger)
+        await callback.message.edit_text(
+            f"{result_text}\n\n❤️ HP: {player.hp}/{player.hp_max}\n{hunger_bar} Голод: {hunger}/10",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="◀️ На базу", callback_data="zs_main")]
+            ])
+        )
+        return
+
     if action == "melee":
-        melee_tier = equipment.get("melee", 0)
-        melee_item = get_equipment_item("melee", melee_tier)
-        player_damage = melee_item.get("damage", 5)
-        zombie_hp -= player_damage
-        if zombie_hp <= 0:
-            victory = True
-            result_text = f"⚔️ Удар! ({player_damage} урона) — Зомби убит!"
-        else:
-            damage_taken = random.randint(*zombie_damage_range)
-            result_text = f"⚔️ Удар! ({player_damage} урона) — Зомби контратакует!"
-
+        damage = melee_damage
+        result_text = f"⚔️ Удар! -{damage} HP зомби."
     elif action == "ranged":
-        ranged_tier = equipment.get("ranged", 0)
+        ranged_tier = inventory.ranged_tier or 0
         if ranged_tier == 0:
-            damage_taken = random.randint(*zombie_damage_range)
-            result_text = "🔫 Нет оружия дальнего боя!"
-        else:
-            ranged_item = get_equipment_item("ranged", ranged_tier)
-            ammo_cost = ranged_item.get("ammo_cost", 0)
+            await callback.answer("❌ Нет дальнего оружия!")
+            return
+        ammo_cost = EQUIPMENT["ranged"]["tiers"][ranged_tier].get("ammo_cost", 0)
+        if ammo_cost > 0:
             resources = dict(inventory.resources or {})
-            if ammo_cost > 0 and resources.get("ammo", 0) < ammo_cost:
-                damage_taken = random.randint(*zombie_damage_range)
-                result_text = "🔫 Нет патронов!"
-            else:
-                if ammo_cost > 0:
-                    resources["ammo"] -= ammo_cost
-                    inventory.resources = resources
-                player_damage = ranged_item.get("damage", 0)
-                zombie_hp -= player_damage
-                if zombie_hp <= 0:
-                    victory = True
-                    result_text = f"🔫 Выстрел! ({player_damage} урона) — Зомби убит!"
-                else:
-                    damage_taken = random.randint(0, zombie_damage_range[1] // 2)
-                    result_text = f"🔫 Выстрел! ({player_damage} урона) — Зомби ещё жив!"
+            if resources.get("ammo", 0) < ammo_cost:
+                await callback.answer("❌ Нет боеприпасов!")
+                return
+            resources["ammo"] = resources["ammo"] - ammo_cost
+            inventory.resources = resources
+        damage = ranged_damage
+        result_text = f"🔫 Выстрел! -{damage} HP зомби."
 
-    defense = get_total_defense(equipment)
-    actual_damage = max(0, damage_taken - defense // 5)
-
-    # НПС помогают в обороне
-    npcs = await get_npcs(session, user.telegram_id)
-    idle_npcs = [n for n in npcs if n.status == "idle"]
-    npc_damage = len(idle_npcs) * random.randint(3, 8)
-    if not victory:
-        zombie_hp -= npc_damage
+    zombie_hp -= damage
+    result_text += f"\nЗомби: {max(0, zombie_hp)}/{zombie_hp_max} HP"
 
     if zombie_hp <= 0:
-        victory = True
-        if npc_damage > 0:
-            result_text += f"\n👥 Выжившие помогли! ({npc_damage} урона)"
+        # Победа
+        resources = await process_combat_victory(session, player, inventory, loc_id, is_combat_loot)
+        res_text = ""
+        if resources:
+            res_list = ", ".join([f"{RESOURCES[r]['name'].split()[-1]} x{a}" for r, a in resources.items()])
+            res_text = f"\n📦 Лут: {res_list}"
+        hunger = player.hunger
+        hunger_bar = "🍖" * hunger + "⬛" * (10 - hunger)
+        await callback.message.edit_text(
+            f"✅ Зомби повержен!{res_text}\n\n❤️ HP: {player.hp}/{player.hp_max}\n{hunger_bar} Голод: {hunger}/10",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="◀️ На базу", callback_data="zs_main")]
+            ])
+        )
+        return
 
-    player.hp = max(0, player.hp - actual_damage)
+    # Зомби атакует
+    dmg = max(1, zombie_damage - player_defense)
+    player.hp = max(0, player.hp - dmg)
     await session.commit()
-
-    damage_text = ""
-    if actual_damage > 0:
-        absorbed = damage_taken - actual_damage
-        damage_text = f"\n💥 Урон: {actual_damage}"
-        if absorbed > 0:
-            damage_text += f" (🛡 поглощено {absorbed})"
+    result_text += f"\n🧟 Зомби атакует! -{dmg} HP"
 
     if player.hp <= 0:
-        player.is_alive = False
-        await session.commit()
-        text = f"{result_text}{damage_text}\n\n💀 Ты погиб. Игра окончена."
-        image = await get_image(session, "death")
-        if image:
-            try:
-                await callback.message.delete()
-            except Exception:
-                pass
-            await callback.message.answer_photo(image.file_id, caption=text, reply_markup=dead_menu())
-        else:
-            try:
-                await callback.message.edit_text(text, reply_markup=dead_menu())
-            except Exception:
-                await callback.message.answer(text, reply_markup=dead_menu())
-        return
-
-    if victory:
-        # Лечение медпунктом после победы
-        buildings = base.buildings or {}
-        medpost_level = buildings.get("medpost", 0)
-        heal_amount = 0
-        if medpost_level > 0:
-            heal_amount = [10, 25, 50][medpost_level - 1]
-        old_hp = player.hp
-        player.hp = min(player.hp_max, player.hp + heal_amount)
-        actual_heal = player.hp - old_hp
-        await session.commit()
-
-        if heal_amount > 0:
-            morning_text = f"\n\n☀️ Утро: ❤️ +{actual_heal} HP от медпункта"
-        else:
-            morning_text = ""
-
-        # Результаты НПС — возвращаем после победы
-        npc_text = ""
-        await state.clear()
-        try:
-            nr = await return_npcs(session, player)
-            if nr["returned"]:
-                npc_text += "\n\n👥 Выжившие вернулись:\n"
-                for r in nr["returned"]:
-                    if r["resources"]:
-                        res_list = ", ".join([f"{RESOURCES[res]['name'].split()[-1]} x{amt}" for res, amt in r["resources"].items()])
-                        npc_text += f"  ✅ {r['name']}: {res_list}\n"
-                    else:
-                        npc_text += f"  ✅ {r['name']}: ничего не нашёл\n"
-                    if r.get("leveled_up"):
-                        level_data = get_npc_level_data(r["level"])
-                        npc_text += f"  🎉 {r['name']} повысил уровень до {r['level']} ({level_data['name']})!\n"
-            if nr["died"]:
-                npc_text += "\n💀 Погибли на задании:\n"
-                for name in nr["died"]:
-                    npc_text += f"  ❌ {name}\n"
-        except Exception:
-            pass
-
-        import random as _rtip
-        tip = _rtip.choice(TIPS)
-
-        hunger = getattr(player, "hunger", 10)
-        if hunger == 0:
-            hunger_icon = "💀"
-        elif hunger <= 3:
-            hunger_icon = "⚠️"
-        else:
-            hunger_icon = "🍖"
-        hunger_bar = "🍖" * hunger + "⬛" * (10 - hunger)
-
-        text = (
-            f"🌙 Ночное нападение отбито!\n\n"
-            f"{result_text}{damage_text}\n\n"
-            f"❤️ HP: {player.hp}/{player.hp_max}\n"
-            f"{hunger_bar}\n"
-            f"{hunger_icon} Голод: {hunger}/10\n"
-            f"📅 День {player.day}"
-            f"{morning_text}"
-            f"{npc_text}\n\n"
-            f"💡 Совет дня: {tip}"
-        )
-        image = await get_image(session, f"base_{base.level}")
-        if image:
-            try:
-                await callback.message.delete()
-            except Exception:
-                pass
-            await callback.message.answer_photo(image.file_id, caption=text, reply_markup=main_menu(player, base))
-        else:
-            try:
-                await callback.message.edit_text(text, reply_markup=main_menu(player, base))
-            except Exception:
-                await callback.message.answer(text, reply_markup=main_menu(player, base))
-    else:
-        zombie_hp = max(0, zombie_hp)
-        filled = zombie_hp * 10 // zombie_hp_max
-        hp_bar = "🟥" * filled + "⬛" * (10 - filled)
-        text = (
-            f"🧟 Орда {hp_bar} {zombie_hp}/{zombie_hp_max}\n"
-            f"❤️ Ты: {player.hp}/{player.hp_max}\n\n"
-            f"{result_text}{damage_text}"
-        )
-        buttons = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="⚔️ Ближний бой", callback_data=f"zs_night_fight_melee_{zombie_hp}_{zombie_hp_max}_{dmg_min}_{dmg_max}")],
-            [InlineKeyboardButton(text="🔫 Стрелять",    callback_data=f"zs_night_fight_ranged_{zombie_hp}_{zombie_hp_max}_{dmg_min}_{dmg_max}")],
-        ])
-        try:
-            await callback.message.edit_text(text, reply_markup=buttons)
-        except Exception:
-            await callback.message.answer(text, reply_markup=buttons)
-
-# ─── БАЗА ────────────────────────────────────────────────────────────────────
-
-@router.callback_query(F.data == "zs_base")
-async def cb_base(callback: CallbackQuery, user: User, session: AsyncSession):
-    base = await get_base(session, user.telegram_id)
-    buildings = base.buildings or {}
-    defense = DEFENSE_LEVELS[base.defense_level]
-
-    text = f"🏠 База (уровень {base.level}/5)\n"
-    text += f"🛡 Защита: {defense['name']} (-{defense['damage_reduction']}% урона)\n\n"
-    text += "Постройки:\n"
-    for b_id, b_data in BUILDINGS.items():
-        level = buildings.get(b_id, 0)
-        max_level = len(b_data["levels"])
-        text += f"  {b_data['name']}: {'ур.' + str(level) + '/' + str(max_level) if level > 0 else 'не построено'}\n"
-
-    buttons = [
-        [InlineKeyboardButton(text="🏗 Строить/улучшать", callback_data="zs_build_menu")],
-    ]
-
-    if base.level < 5:
-        next_level = base.level + 1
-        if next_level in BASE_LEVELS:
-            buttons.append([InlineKeyboardButton(
-                text=f"⬆️ Улучшить базу до ур.{next_level}",
-                callback_data="zs_upgrade_base"
-            )])
-
-    buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="zs_main")])
-
-    try:
-        await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
-    except Exception:
-        await callback.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
-
-@router.callback_query(F.data == "zs_build_menu")
-async def cb_build_menu(callback: CallbackQuery, user: User, session: AsyncSession):
-    base = await get_base(session, user.telegram_id)
-    inventory = await get_inventory(session, user.telegram_id)
-    buildings = base.buildings or {}
-    resources = inventory.resources or {}
-
-    text = "🏗 Строительство\n\n"
-
-    text += "📋 Постройки:\n"
-    for b_id, b_data in BUILDINGS.items():
-        current_level = buildings.get(b_id, 0)
-        if current_level < len(b_data["levels"]):
-            next_level = b_data["levels"][current_level]
-            cost = next_level["cost"]
-            can_afford = all(resources.get(r, 0) >= a for r, a in cost.items())
-            icon = "✅" if can_afford else "❌"
-            action = f"ур.{current_level}→{current_level+1}" if current_level > 0 else "построить"
-            cost_lines = "\n".join([f"      - {RESOURCES[r]['name'].split()[-1]} x{a}" for r, a in cost.items()])
-            text += f"{icon} {b_data['name']} ({action})\n"
-            text += f"   {b_data['description']}\n"
-            text += f"   Нужно:\n{cost_lines}\n\n"
-
-    defense_level = base.defense_level
-    if defense_level < len(DEFENSE_LEVELS) - 1:
-        next_defense = DEFENSE_LEVELS[defense_level + 1]
-        cost = next_defense["cost"]
-        can_afford = all(resources.get(r, 0) >= a for r, a in cost.items())
-        icon = "✅" if can_afford else "❌"
-        cost_lines = "\n".join([f"      - {RESOURCES[r]['name'].split()[-1]} x{a}" for r, a in cost.items()]) if cost else "бесплатно"
-        text += f"🛡 Защита:\n"
-        text += f"{icon} {next_defense['name']} (-{next_defense['damage_reduction']}% урона)\n"
-        text += f"   Нужно:\n{cost_lines}\n\n"
-
-    buttons = []
-    for b_id, b_data in BUILDINGS.items():
-        current_level = buildings.get(b_id, 0)
-        if current_level < len(b_data["levels"]):
-            next_level_data = b_data["levels"][current_level]
-            can_afford = all(resources.get(r, 0) >= a for r, a in next_level_data["cost"].items())
-            icon = "✅" if can_afford else "❌"
-            action = "Улучшить" if current_level > 0 else "Построить"
-            buttons.append([InlineKeyboardButton(
-                text=f"{icon} {action} {b_data['name']}",
-                callback_data=f"zs_build_{b_id}"
-            )])
-
-    if defense_level < len(DEFENSE_LEVELS) - 1:
-        next_defense = DEFENSE_LEVELS[defense_level + 1]
-        cost = next_defense["cost"]
-        can_afford = all(resources.get(r, 0) >= a for r, a in cost.items()) if cost else True
-        icon = "✅" if can_afford else "❌"
-        buttons.append([InlineKeyboardButton(
-            text=f"{icon} Улучшить защиту → {next_defense['name']}",
-            callback_data="zs_build_defense"
-        )])
-
-    buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="zs_base")])
-    try:
-        await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
-    except Exception:
-        await callback.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
-
-@router.callback_query(F.data.startswith("zs_build_"))
-async def cb_build(callback: CallbackQuery, user: User, session: AsyncSession):
-    build_id = callback.data.replace("zs_build_", "")
-    result = await build(session, user.telegram_id, build_id)
-    if result["success"]:
-        await callback.answer("✅ Построено!")
-    else:
-        await callback.answer(f"❌ {result['error']}")
-    await cb_base(callback, user, session)
-
-@router.callback_query(F.data == "zs_upgrade_base")
-async def cb_upgrade_base(callback: CallbackQuery, user: User, session: AsyncSession):
-    base = await get_base(session, user.telegram_id)
-    next_level = base.level + 1
-
-    if next_level not in BASE_LEVELS:
-        await callback.answer("✅ База уже максимального уровня.")
-        return
-
-    req = BASE_LEVELS[next_level]
-    req_text = "Требования:\n"
-    for b_id, level in req["requirements"].items():
-        req_text += f"  {BUILDINGS[b_id]['name']} ур.{level}\n"
-    cost_text = ", ".join([f"{RESOURCES[r]['name']} x{a}" for r, a in req["cost"].items()])
-    req_text += f"💰 {cost_text}"
-
-    buttons = [
-        [InlineKeyboardButton(text=f"✅ Улучшить до ур.{next_level}", callback_data="zs_upgrade_base_confirm")],
-        [InlineKeyboardButton(text="◀️ Назад", callback_data="zs_base")],
-    ]
-    try:
+        await delete_player(session, user.telegram_id)
         await callback.message.edit_text(
-            f"⬆️ Улучшение базы до уровня {next_level}\n\n{req_text}",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+            "💀 Ты погиб в бою!\n\nИгра окончена.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔄 Начать заново", callback_data="menu_zs")]
+            ])
         )
-    except Exception:
-        await callback.message.answer(
-            f"⬆️ Улучшение базы до уровня {next_level}\n\n{req_text}",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
-        )
+        return
 
-@router.callback_query(F.data == "zs_upgrade_base_confirm")
-async def cb_upgrade_base_confirm(callback: CallbackQuery, user: User, session: AsyncSession):
-    result = await upgrade_base(session, user.telegram_id)
-    if result["success"]:
-        await callback.answer(f"✅ База улучшена до уровня {result['level']}!")
-    else:
-        await callback.answer(f"❌ {result['error']}")
-    await cb_base(callback, user, session)
-
-# ─── ИНВЕНТАРЬ ───────────────────────────────────────────────────────────────
-
-@router.callback_query(F.data == "zs_inventory")
-async def cb_inventory(callback: CallbackQuery, user: User, session: AsyncSession):
-    inventory = await get_inventory(session, user.telegram_id)
-    equipment = inventory.equipment or {}
-    resources = inventory.resources or {}
-    defense = get_total_defense(equipment)
-    slots = get_backpack_slots(equipment)
-
-    slot_names = {
-        "helmet":   "🪖 Шлем",
-        "armor":    "👕 Броня",
-        "pants":    "👖 Штаны",
-        "boots":    "👟 Обувь",
-        "melee":    "⚔️ Ближний бой",
-        "ranged":   "🔫 Дальний бой",
-        "backpack": "🎒 Рюкзак",
-    }
-
-    text = "🎒 Инвентарь\n\n🛡 Снаряжение:\n"
-    for slot_id, slot_name in slot_names.items():
-        tier = equipment.get(slot_id, 0)
-        item = get_equipment_item(slot_id, tier)
-        text += f"  {slot_name}: {item.get('name', '—')}\n"
-
-    text += f"\n🛡 Защита: {defense} | 🎒 Слотов на вылазке: {slots}\n"
-
-    text += "\n📦 Ресурсы:\n"
-    if resources:
-        for res_id, amount in resources.items():
-            if amount > 0:
-                text += f"  {RESOURCES.get(res_id, {}).get('name', res_id)}: {amount}\n"
-    else:
-        text += "  Пусто\n"
-
-    food = resources.get("food", 0)
+    # Продолжаем бой
+    filled = zombie_hp * 10 // zombie_hp_max
+    hp_bar = "🟥" * filled + "⬛" * (10 - filled)
+    text = (
+        f"🧟 Зомби {hp_bar} {zombie_hp}/{zombie_hp_max}\n"
+        f"❤️ Ты: {player.hp}/{player.hp_max}\n\n"
+        f"{result_text}"
+    )
+    combat_data_new = f"{loc_id}_{zombie_hp}_{zombie_hp_max}_{zombie_damage}_{1 if is_combat_loot else 0}"
     buttons = [
-        [InlineKeyboardButton(text="⬆️ Улучшить снаряжение", callback_data="zs_upgrade_menu")],
+        [InlineKeyboardButton(text="⚔️ Атаковать", callback_data=f"zs_fight_melee_{combat_data_new}")],
+        [InlineKeyboardButton(text="🔫 Стрелять", callback_data=f"zs_fight_ranged_{combat_data_new}")],
+        [InlineKeyboardButton(text="🏃 Убежать", callback_data=f"zs_fight_flee_{combat_data_new}")],
     ]
-    if food > 0:
-        buttons.append([InlineKeyboardButton(text=f"🍖 Поесть (+2 голода) | Еда: {food}", callback_data="zs_eat_day")])
-    buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="zs_main")])
     try:
         await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
     except Exception:
         await callback.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
 
-@router.callback_query(F.data == "zs_eat_day")
-async def cb_eat_day(callback: CallbackQuery, user: User, session: AsyncSession):
-    player = await get_player(session, user.telegram_id)
-    inventory = await get_inventory(session, user.telegram_id)
-    if getattr(player, "hunger", 10) >= 10:
-        await callback.answer("🍖 Голод уже полный!")
-        return
-    success = await eat_food(session, player, inventory)
-    if not success:
-        await callback.answer("❌ Нет еды!")
-        return
-    await callback.answer(f"🍖 +2 голода. Голод: {player.hunger}/10")
-    await cb_inventory(callback, user, session)
+@router.callback_query(F.data.startswith("zs_fight_melee_"))
+async def cb_fight_melee(callback: CallbackQuery, user: User, session: AsyncSession):
+    await process_fight(callback, user, session, "melee", callback.data.replace("zs_fight_melee_", ""))
 
-@router.callback_query(F.data == "zs_upgrade_menu")
-async def cb_upgrade_menu(callback: CallbackQuery, user: User, session: AsyncSession):
-    base = await get_base(session, user.telegram_id)
-    inventory = await get_inventory(session, user.telegram_id)
-    equipment = inventory.equipment or {}
-    resources = inventory.resources or {}
-    workshop_tier = get_workshop_tier(base.buildings or {})
+@router.callback_query(F.data.startswith("zs_fight_ranged_"))
+async def cb_fight_ranged(callback: CallbackQuery, user: User, session: AsyncSession):
+    await process_fight(callback, user, session, "ranged", callback.data.replace("zs_fight_ranged_", ""))
 
-    if workshop_tier == 0:
-        try:
-            await callback.message.edit_text(
-                "❌ Нужна мастерская для улучшения снаряжения.",
-                reply_markup=back_button("zs_inventory")
-            )
-        except Exception:
-            await callback.message.answer(
-                "❌ Нужна мастерская для улучшения снаряжения.",
-                reply_markup=back_button("zs_inventory")
-            )
-        return
-
-    slot_names = {
-        "helmet":   "🪖 Шлем",
-        "armor":    "👕 Броня",
-        "pants":    "👖 Штаны",
-        "boots":    "👟 Обувь",
-        "melee":    "⚔️ Ближний бой",
-        "ranged":   "🔫 Дальний бой",
-        "backpack": "🎒 Рюкзак",
-    }
-
-    text = f"⬆️ Улучшение снаряжения\n🔧 Мастерская тир {workshop_tier}\n\n"
-    buttons = []
-
-    for slot_id, slot_name in slot_names.items():
-        tier = equipment.get(slot_id, 0)
-        chain = EQUIPMENT_CHAINS.get(slot_id, [])
-        if tier + 1 < len(chain):
-            next_item = chain[tier + 1]
-            if next_item.get("craft_tier", 1) <= workshop_tier:
-                cost = next_item.get("cost", {})
-                can_afford = all(resources.get(r, 0) >= a for r, a in cost.items())
-                icon = "✅" if can_afford else "❌"
-                current_item = get_equipment_item(slot_id, tier)
-                cost_lines = "\n".join([f"    - {RESOURCES[r]['name'].split()[-1]} x{a}" for r, a in cost.items()])
-                text += f"{icon} {slot_name}\n"
-                text += f"  {current_item.get('name')} → {next_item['name']}\n"
-                text += f"  Нужно:\n{cost_lines}\n\n"
-                buttons.append([InlineKeyboardButton(
-                    text=f"{icon} {slot_name} → {next_item['name']}",
-                    callback_data=f"zs_upgrade_{slot_id}"
-                )])
-
-    if not buttons:
-        try:
-            await callback.message.edit_text(
-                "✅ Всё снаряжение максимального уровня для текущей мастерской.",
-                reply_markup=back_button("zs_inventory")
-            )
-        except Exception:
-            await callback.message.answer(
-                "✅ Всё снаряжение максимального уровня для текущей мастерской.",
-                reply_markup=back_button("zs_inventory")
-            )
-        return
-
-    buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="zs_inventory")])
-    try:
-        await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
-    except Exception:
-        await callback.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
-
-@router.callback_query(F.data.startswith("zs_upgrade_"))
-async def cb_upgrade_item(callback: CallbackQuery, user: User, session: AsyncSession):
-    slot = callback.data.replace("zs_upgrade_", "")
-    result = await upgrade_equipment(session, user.telegram_id, slot)
-    if result["success"]:
-        await callback.answer(f"✅ {result['item']['name']} готово!")
-    else:
-        await callback.answer(f"❌ {result['error']}")
-    await cb_upgrade_menu(callback, user, session)
-
-# ─── НПС ─────────────────────────────────────────────────────────────────────
+@router.callback_query(F.data.startswith("zs_fight_flee_"))
+async def cb_fight_flee(callback: CallbackQuery, user: User, session: AsyncSession):
+    await process_fight(callback, user, session, "flee", callback.data.replace("zs_fight_flee_", ""))
+# ─── ВЫЖИВШИЕ ─────────────────────────────────────────────────────────────────
 
 @router.callback_query(F.data == "zs_npcs")
 async def cb_npcs(callback: CallbackQuery, user: User, session: AsyncSession):
-    npcs = await get_npcs(session, user.telegram_id)
     base = await get_base(session, user.telegram_id)
-    max_npcs = get_max_npcs(base.level)
+    npcs = await get_npcs(session, user.telegram_id)
+    max_npcs = await get_max_npcs(base)
 
     if not npcs:
-        text = f"👥 Выжившие (0/{max_npcs})\n\nНикого нет. Ищи выживших на вылазках."
+        text = f"👥 Выжившие (0/{max_npcs})\n\nНикого нет. Ищи выживших на вылазках (вариант В)."
         buttons = [[InlineKeyboardButton(text="◀️ Назад", callback_data="zs_main")]]
     else:
         text = f"👥 Выжившие ({len(npcs)}/{max_npcs})\n\n"
@@ -1294,28 +754,69 @@ async def cb_npcs(callback: CallbackQuery, user: User, session: AsyncSession):
         for npc in npcs:
             level_data = get_npc_level_data(npc.level)
             exp_needed = get_npc_exp_needed(npc.level)
-            status = "🏠 На базе" if npc.status == "idle" else f"🗺 На задании ({npc.location})"
             loc_name = LOCATIONS.get(npc.location, {}).get("name", npc.location) if npc.location else ""
             status_text = "🏠 На базе" if npc.status == "idle" else f"🗺 На задании ({loc_name})"
-            text += f"👤 {npc.name}\n"
-            text += f"   ⭐ Ур.{npc.level} {level_data['name']} | Опыт: {npc.exp}/{exp_needed}\n"
-            text += f"   📊 Заданий выполнено: {npc.missions_survived}/{npc.missions_total}\n"
-            text += f"   Статус: {status_text}\n\n"
+            weapon = EQUIPMENT["melee"]["tiers"][npc.weapon_tier or 0]["name"]
+            armor = EQUIPMENT["armor"]["tiers"][npc.armor_tier or 0]["name"]
+            hunger_bar = "🍖" * (npc.hunger or 0) + "⬛" * (10 - (npc.hunger or 0))
+            text += (
+                f"👤 {npc.name}\n"
+                f"   ⭐ Ур.{npc.level} {level_data['name']} | Опыт: {npc.exp}/{exp_needed}\n"
+                f"   ❤️ HP: {npc.hp}/{npc.hp_max} | {hunger_bar}\n"
+                f"   ⚔️ {weapon} | 🛡 {armor}\n"
+                f"   📊 Заданий выполнено: {npc.missions_survived}/{npc.missions_total}\n"
+                f"   Статус: {status_text}\n\n"
+            )
             if npc.status == "idle":
+                buttons.append([
+                    InlineKeyboardButton(text=f"📤 Отправить {npc.name}", callback_data=f"zs_send_npc_{npc.id}"),
+                    InlineKeyboardButton(text=f"🍖 Покормить", callback_data=f"zs_feed_npc_{npc.id}"),
+                ])
                 buttons.append([InlineKeyboardButton(
-                    text=f"📤 Отправить {npc.name} (Ур.{npc.level})",
-                    callback_data=f"zs_send_npc_{npc.id}"
+                    text=f"🔧 Снаряжение {npc.name}",
+                    callback_data=f"zs_npc_equip_{npc.id}"
                 )])
         buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="zs_main")])
 
     try:
         await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
     except Exception:
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
         await callback.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+
+@router.callback_query(F.data.startswith("zs_feed_npc_"))
+async def cb_feed_npc(callback: CallbackQuery, user: User, session: AsyncSession):
+    npc_id = int(callback.data.replace("zs_feed_npc_", ""))
+    from sqlalchemy import select as sa_select
+    from models.zombie_survival import ZSNPC as ZSNPCModel
+    result = await session.execute(sa_select(ZSNPCModel).where(ZSNPCModel.id == npc_id))
+    npc = result.scalar_one_or_none()
+    if not npc:
+        await callback.answer("❌ НПС не найден.")
+        return
+    inventory = await get_inventory(session, user.telegram_id)
+    success = await feed_npc(session, npc, inventory)
+    if success:
+        await callback.answer(f"🍖 {npc.name} накормлен! Голод: {npc.hunger}/10")
+    else:
+        await callback.answer("❌ Еды нет!")
+    await cb_npcs(callback, user, session)
 
 @router.callback_query(F.data.startswith("zs_send_npc_"))
 async def cb_send_npc(callback: CallbackQuery, user: User, session: AsyncSession):
     npc_id = int(callback.data.replace("zs_send_npc_", ""))
+    from sqlalchemy import select as sa_select
+    from models.zombie_survival import ZSNPC as ZSNPCModel
+    result = await session.execute(sa_select(ZSNPCModel).where(ZSNPCModel.id == npc_id))
+    npc = result.scalar_one_or_none()
+    if not npc:
+        await callback.answer("❌ НПС не найден.")
+        return
+
+    text = f"📤 Отправить {npc.name} на задание\n\nВыбери локацию:"
     buttons = []
     for loc_id, loc in LOCATIONS.items():
         tier_icon = {"1": "🟢", "2": "🟡", "3": "🔴"}.get(str(loc["tier"]), "⚪")
@@ -1324,139 +825,433 @@ async def cb_send_npc(callback: CallbackQuery, user: User, session: AsyncSession
             callback_data=f"zs_npc_mission_{npc_id}_{loc_id}"
         )])
     buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="zs_npcs")])
+
     try:
-        await callback.message.edit_text(
-            "📤 Выбери локацию для задания:\n\nВыживший вернётся в конце дня.",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
-        )
+        await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
     except Exception:
-        await callback.message.answer(
-            "📤 Выбери локацию для задания:",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
-        )
+        await callback.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
 
 @router.callback_query(F.data.startswith("zs_npc_mission_"))
 async def cb_npc_mission(callback: CallbackQuery, user: User, session: AsyncSession):
-    parts = callback.data.replace("zs_npc_mission_", "").split("_")
+    parts = callback.data.replace("zs_npc_mission_", "").split("_", 1)
     npc_id = int(parts[0])
-    loc_id = "_".join(parts[1:])
-    result = await send_npc_on_mission(session, npc_id, loc_id)
-    if result["success"]:
-        loc = LOCATIONS.get(loc_id, {})
-        await callback.answer(f"✅ Отправлен в {loc.get('name', loc_id)}")
-    else:
-        await callback.answer(f"❌ {result['error']}")
+    loc_id = parts[1]
+    from sqlalchemy import select as sa_select
+    from models.zombie_survival import ZSNPC as ZSNPCModel
+    result = await session.execute(sa_select(ZSNPCModel).where(ZSNPCModel.id == npc_id))
+    npc = result.scalar_one_or_none()
+    if not npc:
+        await callback.answer("❌ НПС не найден.")
+        return
+    await send_npc_on_mission(session, npc, loc_id)
+    loc_name = LOCATIONS[loc_id]["name"]
+    await callback.answer(f"📤 {npc.name} отправлен в {loc_name}")
     await cb_npcs(callback, user, session)
 
-# ─── РЕСТАРТ ─────────────────────────────────────────────────────────────────
-
-@router.callback_query(F.data == "zs_restart")
-async def cb_restart(callback: CallbackQuery, user: User, session: AsyncSession, state: FSMContext):
-    await reset_player(session, user.telegram_id)
-    await callback.message.answer(
-        "🔄 Начинаем заново!\n\nВведи имя своего персонажа:"
-    )
-    await state.set_state(ZSStates.entering_name)
-
-# ─── УПРАВЛЕНИЕ ИЗОБРАЖЕНИЯМИ (только owner) ─────────────────────────────────
-
-@router.message(Command("zsimages"))
-async def cmd_zs_images(message: Message, user: User):
-    if user.role != "owner":
-        await message.answer("⛔ Только для владельца.")
+@router.callback_query(F.data.startswith("zs_npc_equip_"))
+async def cb_npc_equip(callback: CallbackQuery, user: User, session: AsyncSession):
+    npc_id = int(callback.data.replace("zs_npc_equip_", ""))
+    from sqlalchemy import select as sa_select
+    from models.zombie_survival import ZSNPC as ZSNPCModel
+    result = await session.execute(sa_select(ZSNPCModel).where(ZSNPCModel.id == npc_id))
+    npc = result.scalar_one_or_none()
+    if not npc:
+        await callback.answer("❌ НПС не найден.")
         return
-    text = "🖼 Управление изображениями игры\n\n"
-    text += "Отправь изображение с подписью (ключ):\n\n"
-    for key in IMAGE_KEYS:
-        text += f"  {key}\n"
-    await message.answer(text)
 
-@router.message(F.photo, F.caption.in_(IMAGE_KEYS))
-async def process_zs_image(message: Message, user: User, session: AsyncSession):
-    if user.role != "owner":
-        return
-    key = message.caption
-    file_id = message.photo[-1].file_id
-    await set_image(session, key, file_id, user.telegram_id)
-    await message.answer(f"✅ Изображение '{key}' сохранено!")
+    base = await get_base(session, user.telegram_id)
+    workshop_level = base.workshop or 0
+    inventory = await get_inventory(session, user.telegram_id)
 
-# ─── ПОМОЩЬ ──────────────────────────────────────────────────────────────────
+    weapon = EQUIPMENT["melee"]["tiers"][npc.weapon_tier or 0]["name"]
+    armor = EQUIPMENT["armor"]["tiers"][npc.armor_tier or 0]["name"]
+    text = f"🔧 Снаряжение {npc.name}\n\n⚔️ Оружие: {weapon}\n🛡 Броня: {armor}\n\nВыбери что улучшить:"
 
-TIPS = [
-    "Сначала построй огород — еда нужна постоянно.",
-    "Не ходи в тир 2 локации без снаряжения — зомби там сильные.",
-    "Отправляй НПС на задания каждый день — они приносят ресурсы.",
-    "Строй медпункт как можно раньше — HP само не восстанавливается.",
-    "Следи за голодом перед вылазкой — при 0 теряешь HP.",
-    "Защита базы снижает урон от ночных нападений.",
-    "Рюкзак увеличивает количество ресурсов с вылазки.",
-    "В тир 3 локациях самые редкие ресурсы — кевлар, оптика, редкие металлы.",
-    "Мастерская открывает крафт снаряжения — строй её как можно раньше.",
-    "НПС помогают в ночной обороне — чем больше, тем лучше.",
-    "Наблюдательная вышка показывает ресурсы и шанс зомби в локациях.",
-    "Улучшай снаряжение постепенно — сначала оружие, потом броню.",
-]
+    buttons = []
+    for tier in range(1, min(workshop_level + 1, 6)):
+        tier_data = EQUIPMENT["melee"]["tiers"][tier]
+        cost = tier_data.get("craft", {})
+        cost_str = ", ".join([f"{RESOURCES[r]['name'].split()[-1]} x{a}" for r, a in cost.items()])
+        buttons.append([InlineKeyboardButton(
+            text=f"⚔️ {tier_data['name']} ({cost_str})",
+            callback_data=f"zs_npc_weapon_{npc_id}_{tier}"
+        )])
+    for tier in range(1, min(workshop_level + 1, 6)):
+        tier_data = EQUIPMENT["armor"]["tiers"][tier]
+        cost = tier_data.get("craft", {})
+        cost_str = ", ".join([f"{RESOURCES[r]['name'].split()[-1]} x{a}" for r, a in cost.items()])
+        buttons.append([InlineKeyboardButton(
+            text=f"🛡 {tier_data['name']} ({cost_str})",
+            callback_data=f"zs_npc_armor_{npc_id}_{tier}"
+        )])
+    buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="zs_npcs")])
 
-HELP_TEXT = (
-    "❓ Помощь\n\n"
-    "🎮 Основы:\n"
-    "— Голод уменьшается на вылазках (-1/2/3) и ночью (-1)\n"
-    "— При голоде 0 теряешь 10 HP за каждое действие\n"
-    "— HP восстанавливается только через медпункт ночью\n"
-    "— Еда восстанавливает +2 голода за единицу\n\n"
-    "🏗 Постройки:\n"
-    "— 🏠 Убежище — +20/40/60 макс HP (ур.1/2/3)\n"
-    "— 🔧 Мастерская — крафт снаряжения тир 1-3/4-5/6-8\n"
-    "— 🌱 Огород — +2/5/10 еды каждое утро\n"
-    "— 🏥 Медпункт — +10/25/50 HP каждое утро\n"
-    "— 🔭 Вышка — инфо о локациях перед вылазкой\n\n"
-    "🛡 Защита базы:\n"
-    "— Снижает урон от ночных нападений\n"
-    "— 5 уровней: -10%/-25%/-40%/-60%/-80% урона\n\n"
-    "👥 НПС:\n"
-    "— Находишь на вылазках, отправляешь на задания\n"
-    "— Возвращаются утром с ресурсами\n"
-    "— Помогают в ночной обороне\n\n"
-    "🗺 Локации:\n"
-    "— Тир 1 (2ч) — безопасно, базовые ресурсы\n"
-    "— Тир 2 (4ч) — опасно, средние ресурсы\n"
-    "— Тир 3 (6ч) — очень опасно, редкие ресурсы\n\n"
-    "👥 Уровни выживших:\n"
-    "— Ур.1 Новичок — шанс гибели 25%, лут x1.0\n"
-    "— Ур.2 Выживший — шанс гибели 18%, лут x1.1\n"
-    "— Ур.3 Опытный — шанс гибели 12%, лут x1.2\n"
-    "— Ур.4 Ветеран — шанс гибели 7%, лут x1.35\n"
-    "— Ур.5 Легенда — шанс гибели 3%, лут x1.5\n"
-    "— Опыт: +1 за задание, +1 за ночную оборону"
-)
-
-@router.callback_query(F.data == "zs_help")
-async def cb_zs_help(callback: CallbackQuery, user: User):
     try:
-        await callback.message.edit_text(HELP_TEXT, reply_markup=back_button("zs_main"))
+        await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
     except Exception:
-        await callback.message.answer(HELP_TEXT, reply_markup=back_button("zs_main"))
+        await callback.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+
+@router.callback_query(F.data.startswith("zs_npc_weapon_"))
+async def cb_npc_weapon(callback: CallbackQuery, user: User, session: AsyncSession):
+    parts = callback.data.replace("zs_npc_weapon_", "").split("_")
+    npc_id = int(parts[0])
+    tier = int(parts[1])
+    from sqlalchemy import select as sa_select
+    from models.zombie_survival import ZSNPC as ZSNPCModel
+    result = await session.execute(sa_select(ZSNPCModel).where(ZSNPCModel.id == npc_id))
+    npc = result.scalar_one_or_none()
+    inventory = await get_inventory(session, user.telegram_id)
+    cost = EQUIPMENT["melee"]["tiers"][tier].get("craft", {})
+    resources = dict(inventory.resources or {})
+    for res, amount in cost.items():
+        if resources.get(res, 0) < amount:
+            await callback.answer(f"❌ Недостаточно {RESOURCES[res]['name']}")
+            return
+    for res, amount in cost.items():
+        resources[res] = resources.get(res, 0) - amount
+    inventory.resources = resources
+    npc.weapon_tier = tier
+    await session.commit()
+    await callback.answer(f"✅ Выдано: {EQUIPMENT['melee']['tiers'][tier]['name']}")
+    await cb_npc_equip(callback, user, session)
+
+@router.callback_query(F.data.startswith("zs_npc_armor_"))
+async def cb_npc_armor(callback: CallbackQuery, user: User, session: AsyncSession):
+    parts = callback.data.replace("zs_npc_armor_", "").split("_")
+    npc_id = int(parts[0])
+    tier = int(parts[1])
+    from sqlalchemy import select as sa_select
+    from models.zombie_survival import ZSNPC as ZSNPCModel
+    result = await session.execute(sa_select(ZSNPCModel).where(ZSNPCModel.id == npc_id))
+    npc = result.scalar_one_or_none()
+    inventory = await get_inventory(session, user.telegram_id)
+    cost = EQUIPMENT["armor"]["tiers"][tier].get("craft", {})
+    resources = dict(inventory.resources or {})
+    for res, amount in cost.items():
+        if resources.get(res, 0) < amount:
+            await callback.answer(f"❌ Недостаточно {RESOURCES[res]['name']}")
+            return
+    for res, amount in cost.items():
+        resources[res] = resources.get(res, 0) - amount
+    inventory.resources = resources
+    npc.armor_tier = tier
+    await session.commit()
+    await callback.answer(f"✅ Выдана: {EQUIPMENT['armor']['tiers'][tier]['name']}")
+    await cb_npc_equip(callback, user, session)
+
+# ─── НОЧЬ ─────────────────────────────────────────────────────────────────────
+
+@router.callback_query(F.data == "zs_sleep")
+async def cb_sleep(callback: CallbackQuery, user: User, session: AsyncSession, state: FSMContext):
+    player = await get_player(session, user.telegram_id)
+    base = await get_base(session, user.telegram_id)
+    inventory = await get_inventory(session, user.telegram_id)
+
+    night_result = await process_night(session, player, base, inventory)
+    npc_results = await return_npcs(session, player)
+
+    if night_result.get("attacked"):
+        await state.set_state(ZSStates.night_attack)
+        horde_stats = get_horde_stats(player.day - 1)
+        zombie_hp = night_result["zombie_hp"]
+        zombie_hp_max = night_result["zombie_hp_max"]
+        zombie_damage = night_result["zombie_damage"]
+        defense_level = base.defense or 0
+        defense_reduction = 0
+        if defense_level > 0:
+            from services.zs_data import BUILDINGS as B
+            defense_reduction = B["defense"]["levels"][defense_level]["damage_reduction"]
+
+        filled = zombie_hp * 10 // zombie_hp_max
+        hp_bar = "🟥" * filled + "⬛" * (10 - filled)
+
+        npc_text = ""
+        if npc_results["returned"]:
+            npc_text += "\n\n👥 Выжившие вернулись с заданий:\n"
+            for r in npc_results["returned"]:
+                if r["resources"]:
+                    res_list = ", ".join([f"{RESOURCES[res]['name'].split()[-1]} x{amt}" for res, amt in r["resources"].items()])
+                    npc_text += f"  ✅ {r['name']}: {res_list}\n"
+                else:
+                    npc_text += f"  ✅ {r['name']}: ничего не нашёл\n"
+                if r.get("leveled_up"):
+                    level_data = get_npc_level_data(r["level"])
+                    npc_text += f"  🎉 {r['name']} — ур.{r['level']} {level_data['name']}!\n"
+        if npc_results["died"]:
+            npc_text += "\n💀 Погибли на задании:\n"
+            for name in npc_results["died"]:
+                npc_text += f"  ❌ {name}\n"
+
+        text = (
+            f"🧟 Ночное нападение!\n\n"
+            f"Орда {hp_bar} {zombie_hp}/{zombie_hp_max}\n"
+            f"❤️ Ты: {player.hp}/{player.hp_max}\n"
+            f"🛡 Защита базы: -{defense_reduction}%"
+            f"{npc_text}"
+        )
+        combat_data = f"{zombie_hp}_{zombie_hp_max}_{zombie_damage}_{defense_reduction}"
+        buttons = [
+            [InlineKeyboardButton(text="⚔️ Атаковать", callback_data=f"zs_night_fight_melee_{combat_data}")],
+            [InlineKeyboardButton(text="🔫 Стрелять", callback_data=f"zs_night_fight_ranged_{combat_data}")],
+        ]
+        try:
+            await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+        except Exception:
+            try:
+                await callback.message.delete()
+            except Exception:
+                pass
+            await callback.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+        return
+
+    # Тихая ночь
+    hunger = player.hunger
+    hunger_bar = "🍖" * hunger + "⬛" * (10 - hunger)
+    tip = _r.choice(TIPS)
+
+    npc_text = ""
+    if npc_results["returned"]:
+        npc_text += "\n\n👥 Выжившие вернулись:\n"
+        for r in npc_results["returned"]:
+            if r["resources"]:
+                res_list = ", ".join([f"{RESOURCES[res]['name'].split()[-1]} x{amt}" for res, amt in r["resources"].items()])
+                npc_text += f"  ✅ {r['name']}: {res_list}\n"
+            else:
+                npc_text += f"  ✅ {r['name']}: ничего не нашёл\n"
+            if r.get("leveled_up"):
+                level_data = get_npc_level_data(r["level"])
+                npc_text += f"  🎉 {r['name']} — ур.{r['level']} {level_data['name']}!\n"
+    if npc_results["died"]:
+        npc_text += "\n💀 Погибли на задании:\n"
+        for name in npc_results["died"]:
+            npc_text += f"  ❌ {name}\n"
+
+    morning_text = ""
+    if night_result.get("medpost_heal", 0) > 0:
+        morning_text += f"\n☀️ Медпункт: +{night_result['medpost_heal']} HP"
+    if night_result.get("garden_food", 0) > 0:
+        morning_text += f"\n🌱 Огород: +{night_result['garden_food']} еды"
+
+    text = (
+        f"😴 Ты отдохнул до утра.\n"
+        f"{morning_text}\n\n"
+        f"❤️ HP: {player.hp}/{player.hp_max}\n"
+        f"{hunger_bar}\n"
+        f"🍖 Голод: {hunger}/10\n"
+        f"📅 День {player.day}"
+        f"{npc_text}\n\n"
+        f"✅ Ночь прошла спокойно.\n\n"
+        f"💡 {tip}"
+    )
+
+    try:
+        await callback.message.edit_text(text, reply_markup=main_menu(player, base))
+    except Exception:
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+        await callback.message.answer(text, reply_markup=main_menu(player, base))
+
+@router.callback_query(F.data.startswith("zs_night_fight_"))
+async def cb_night_fight(callback: CallbackQuery, user: User, session: AsyncSession, state: FSMContext):
+    parts = callback.data.replace("zs_night_fight_", "").split("_", 1)
+    action = parts[0]
+    combat_data = parts[1]
+    data_parts = combat_data.split("_")
+    zombie_hp = int(data_parts[0])
+    zombie_hp_max = int(data_parts[1])
+    zombie_damage = int(data_parts[2])
+    defense_reduction = int(data_parts[3])
+
+    player = await get_player(session, user.telegram_id)
+    inventory = await get_inventory(session, user.telegram_id)
+    base = await get_base(session, user.telegram_id)
+    player_defense = await get_player_defense(inventory)
+    melee_damage = await get_player_melee_damage(inventory, player)
+    ranged_damage = await get_player_ranged_damage(inventory, player)
+
+    # НПС помогают
+    npcs = await get_npcs(session, user.telegram_id)
+    npc_damage = sum(EQUIPMENT["melee"]["tiers"][npc.weapon_tier or 0]["damage"] for npc in npcs if npc.status == "idle")
+
+    result_text = ""
+    if action == "melee":
+        damage = melee_damage + npc_damage
+        result_text = f"⚔️ Атака! -{damage} HP орды."
+        if npc_damage > 0:
+            result_text += f" (в т.ч. {npc_damage} от выживших)"
+    elif action == "ranged":
+        ranged_tier = inventory.ranged_tier or 0
+        if ranged_tier == 0:
+            await callback.answer("❌ Нет дальнего оружия!")
+            return
+        ammo_cost = EQUIPMENT["ranged"]["tiers"][ranged_tier].get("ammo_cost", 0)
+        if ammo_cost > 0:
+            resources = dict(inventory.resources or {})
+            if resources.get("ammo", 0) < ammo_cost:
+                await callback.answer("❌ Нет боеприпасов!")
+                return
+            resources["ammo"] = resources["ammo"] - ammo_cost
+            inventory.resources = resources
+        damage = ranged_damage + npc_damage
+        result_text = f"🔫 Выстрел! -{damage} HP орды."
+
+    zombie_hp -= damage
+
+    if zombie_hp <= 0:
+        # Победа
+        await state.clear()
+        npc_results = await return_npcs(session, player)
+        heal_amount = 0
+        medpost_level = base.medpost or 0
+        if medpost_level > 0:
+            heal_amount = BUILDINGS["medpost"]["levels"][medpost_level]["heal_per_day"]
+        old_hp = player.hp
+        player.hp = min(player.hp_max, player.hp + heal_amount)
+        await session.commit()
+
+        hunger = player.hunger
+        hunger_bar = "🍖" * hunger + "⬛" * (10 - hunger)
+        tip = _r.choice(TIPS)
+
+        npc_text = ""
+        if npc_results["returned"]:
+            npc_text += "\n\n👥 Выжившие вернулись:\n"
+            for r in npc_results["returned"]:
+                if r["resources"]:
+                    res_list = ", ".join([f"{RESOURCES[res]['name'].split()[-1]} x{amt}" for res, amt in r["resources"].items()])
+                    npc_text += f"  ✅ {r['name']}: {res_list}\n"
+                else:
+                    npc_text += f"  ✅ {r['name']}: ничего не нашёл\n"
+                if r.get("leveled_up"):
+                    level_data = get_npc_level_data(r["level"])
+                    npc_text += f"  🎉 {r['name']} — ур.{r['level']} {level_data['name']}!\n"
+        if npc_results["died"]:
+            npc_text += "\n💀 Погибли на задании:\n"
+            for name in npc_results["died"]:
+                npc_text += f"  ❌ {name}\n"
+
+        morning = f"\n☀️ Медпункт: +{player.hp - old_hp} HP" if heal_amount > 0 else ""
+
+        text = (
+            f"🌙 Нападение отбито!\n\n"
+            f"{result_text}\n\n"
+            f"❤️ HP: {player.hp}/{player.hp_max}\n"
+            f"{hunger_bar}\n"
+            f"🍖 Голод: {hunger}/10\n"
+            f"📅 День {player.day}"
+            f"{morning}"
+            f"{npc_text}\n\n"
+            f"💡 {tip}"
+        )
+        try:
+            await callback.message.edit_text(text, reply_markup=main_menu(player, base))
+        except Exception:
+            try:
+                await callback.message.delete()
+            except Exception:
+                pass
+            await callback.message.answer(text, reply_markup=main_menu(player, base))
+        return
+
+    # Орда атакует
+    effective_damage = max(1, int(zombie_damage * (1 - defense_reduction / 100)) - player_defense)
+    player.hp = max(0, player.hp - effective_damage)
+    await session.commit()
+    result_text += f"\n🧟 Орда атакует! -{effective_damage} HP"
+
+    if player.hp <= 0:
+        await state.clear()
+        await delete_player(session, user.telegram_id)
+        await callback.message.edit_text(
+            "💀 База пала. Ты погиб!\n\nИгра окончена.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔄 Начать заново", callback_data="menu_zs")]
+            ])
+        )
+        return
+
+    filled = max(0, zombie_hp) * 10 // zombie_hp_max
+    hp_bar = "🟥" * filled + "⬛" * (10 - filled)
+    text = (
+        f"🧟 Орда {hp_bar} {zombie_hp}/{zombie_hp_max}\n"
+        f"❤️ Ты: {player.hp}/{player.hp_max}\n\n"
+        f"{result_text}"
+    )
+    combat_data_new = f"{zombie_hp}_{zombie_hp_max}_{zombie_damage}_{defense_reduction}"
+    buttons = [
+        [InlineKeyboardButton(text="⚔️ Атаковать", callback_data=f"zs_night_fight_melee_{combat_data_new}")],
+        [InlineKeyboardButton(text="🔫 Стрелять", callback_data=f"zs_night_fight_ranged_{combat_data_new}")],
+    ]
+    try:
+        await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    except Exception:
+        await callback.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
 
 # ─── ЛОГ СОБЫТИЙ ─────────────────────────────────────────────────────────────
 
-@router.callback_query(F.data == "zs_log")
-async def cb_zs_log(callback: CallbackQuery, user: User, session: AsyncSession):
-    player = await get_player(session, user.telegram_id)
-    events = await get_events(session, user.telegram_id, player.day)
+@router.callback_query(F.data == "zs_events")
+async def cb_events(callback: CallbackQuery, user: User, session: AsyncSession):
+    events = await get_events(session, user.telegram_id)
     if not events:
-        try:
-            await callback.message.edit_text("📋 Лог событий пуст.", reply_markup=back_button("zs_main"))
-        except Exception:
-            await callback.message.answer("📋 Лог событий пуст.", reply_markup=back_button("zs_main"))
-        return
-    text = "📋 Лог событий (последние 3 дня):\n\n"
-    current_day = None
-    for event in events:
-        if event.day != current_day:
-            current_day = event.day
-            text += f"📅 День {event.day}:\n"
-        text += f"  {event.event_text}\n"
+        text = "📋 Лог событий пуст."
+    else:
+        text = "📋 Лог событий:\n\n"
+        for event in reversed(events):
+            text += f"День {event.day}: {event.event_text}\n"
     try:
-        await callback.message.edit_text(text, reply_markup=back_button("zs_main"))
+        await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="zs_main")]
+        ]))
     except Exception:
-        await callback.message.answer(text, reply_markup=back_button("zs_main"))
+        await callback.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="zs_main")]
+        ]))
+
+# ─── ПОМОЩЬ ───────────────────────────────────────────────────────────────────
+
+@router.callback_query(F.data == "zs_help")
+async def cb_help(callback: CallbackQuery, user: User):
+    text = (
+        "❓ Помощь\n\n"
+        "🎯 Цель: выживи как можно дольше.\n\n"
+        "🗺 Вылазки:\n"
+        "— Тир 1 (2ч) — безопасно, базовые ресурсы\n"
+        "— Тир 2 (4ч) — опасно, средние ресурсы\n"
+        "— Тир 3 (6ч) — очень опасно, редкие ресурсы\n"
+        "— Вариант А: поиск лута (риск встретить зомби)\n"
+        "— Вариант Б: гарантированный бой, больше лута\n"
+        "— Вариант В: найти выжившего\n"
+        "— Вариант Г: уйти (+1 голод)\n\n"
+        "🏠 База:\n"
+        "— Убежище: +HP и места для выживших\n"
+        "— Мастерская: крафт снаряжения\n"
+        "— Огород: еда каждое утро\n"
+        "— Медпункт: лечение утром\n"
+        "— Вышка: информация о локациях\n"
+        "— Защита: снижает урон от орды\n\n"
+        "👥 Выжившие:\n"
+        "— Ур.1 Новичок: лут x1.0\n"
+        "— Ур.2 Выживший: лут x1.1\n"
+        "— Ур.3 Опытный: лут x1.2\n"
+        "— Ур.4 Ветеран: лут x1.35\n"
+        "— Ур.5 Легенда: лут x1.5\n"
+        "— Опыт: +1 за задание, +1 за ночную оборону\n\n"
+        "🌙 Ночь:\n"
+        "— 30% шанс нападения орды\n"
+        "— Сила орды растёт каждые 5 дней\n"
+        "— Защита базы снижает урон\n\n"
+        "💊 Лечение:\n"
+        "— Еда: +2 голода\n"
+        "— Медикаменты: +20 HP (медик +30)\n"
+        "— Медпункт: лечит каждое утро"
+    )
+    try:
+        await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="zs_main")]
+        ]))
+    except Exception:
+        await callback.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="zs_main")]
+        ]))

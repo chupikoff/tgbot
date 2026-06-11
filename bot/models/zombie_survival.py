@@ -15,6 +15,7 @@ class ZSPlayer(Base):
     game_time: Mapped[int] = mapped_column(Integer, default=360)
     hunger: Mapped[int] = mapped_column(Integer, default=10)
     is_alive: Mapped[bool] = mapped_column(Boolean, default=True)
+    player_class: Mapped[str] = mapped_column(String(32), default="soldier")
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 class ZSBase(Base):
@@ -25,6 +26,12 @@ class ZSBase(Base):
     level: Mapped[int] = mapped_column(Integer, default=1)
     buildings: Mapped[dict] = mapped_column(JSON, default=dict)
     defense_level: Mapped[int] = mapped_column(Integer, default=0)
+    shelter: Mapped[int] = mapped_column(Integer, default=0)
+    workshop: Mapped[int] = mapped_column(Integer, default=0)
+    garden: Mapped[int] = mapped_column(Integer, default=0)
+    medpost: Mapped[int] = mapped_column(Integer, default=0)
+    watchtower: Mapped[int] = mapped_column(Integer, default=0)
+    defense: Mapped[int] = mapped_column(Integer, default=0)
 
 class ZSInventory(Base):
     __tablename__ = "zs_inventories"
@@ -33,6 +40,13 @@ class ZSInventory(Base):
     telegram_id: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=False)
     resources: Mapped[dict] = mapped_column(JSON, default=dict)
     equipment: Mapped[dict] = mapped_column(JSON, default=dict)
+    helmet_tier: Mapped[int] = mapped_column(Integer, default=0)
+    armor_tier: Mapped[int] = mapped_column(Integer, default=0)
+    pants_tier: Mapped[int] = mapped_column(Integer, default=0)
+    boots_tier: Mapped[int] = mapped_column(Integer, default=0)
+    melee_tier: Mapped[int] = mapped_column(Integer, default=0)
+    ranged_tier: Mapped[int] = mapped_column(Integer, default=0)
+    backpack_tier: Mapped[int] = mapped_column(Integer, default=0)
 
 class ZSNPC(Base):
     __tablename__ = "zs_npcs"
@@ -46,6 +60,11 @@ class ZSNPC(Base):
     exp: Mapped[int] = mapped_column(Integer, default=0)
     missions_total: Mapped[int] = mapped_column(Integer, default=0)
     missions_survived: Mapped[int] = mapped_column(Integer, default=0)
+    hp: Mapped[int] = mapped_column(Integer, default=50)
+    hp_max: Mapped[int] = mapped_column(Integer, default=50)
+    hunger: Mapped[int] = mapped_column(Integer, default=10)
+    weapon_tier: Mapped[int] = mapped_column(Integer, default=0)
+    armor_tier: Mapped[int] = mapped_column(Integer, default=0)
     is_alive: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 

@@ -1,49 +1,53 @@
 import random
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, delete
-from models.zombie_survival import ZSPlayer, ZSBase, ZSInventory, ZSNPC, ZSEvent, ZSImage
+from models.zombie_survival import ZSPlayer, ZSBase, ZSInventory, ZSNPC, ZSEvent
 from services.zs_data import (
-    STARTER_EQUIPMENT, NPC_NAMES, get_max_npcs,
-    BUILDINGS, DEFENSE_LEVELS, BASE_LEVELS,
-    get_workshop_tier, get_backpack_slots, RESOURCES
+    RESOURCES, CLASSES, LOCATIONS, EQUIPMENT, BUILDINGS,
+    NPC_LEVELS, get_npc_level_data, get_npc_exp_needed,
+    get_horde_stats, NIGHT_ATTACK_CHANCE
 )
 
-# ─── ИГРОК ───────────────────────────────────────────────────────────────────
+NPC_NAMES = [
+    "Андрей", "Мария", "Олег", "Наталья", "Дмитрий", "Ирина",
+    "Сергей", "Анна", "Виктор", "Елена", "Павел", "Оксана",
+    "Алексей", "Юлия", "Максим", "Татьяна", "Роман", "Светлана",
+    "Денис", "Людмила", "Артём", "Вера", "Евгений", "Надежда",
+]
+
+# ─── ИГРОК ────────────────────────────────────────────────────────────────────
 
 async def get_player(session: AsyncSession, telegram_id: int) -> ZSPlayer | None:
-    result = await session.execute(
-        select(ZSPlayer).where(ZSPlayer.telegram_id == telegram_id)
-    )
+    result = await session.execute(select(ZSPlayer).where(ZSPlayer.telegram_id == telegram_id))
     return result.scalar_one_or_none()
 
-async def get_base(session: AsyncSession, telegram_id: int) -> ZSBase | None:
-    result = await session.execute(
-        select(ZSBase).where(ZSBase.telegram_id == telegram_id)
+async def create_player(session: AsyncSession, telegram_id: int, name: str, player_class: str) -> ZSPlayer:
+    class_data = CLASSES.get(player_class, CLASSES["soldier"])
+    hp_max = 100 + class_data["hp_bonus"]
+    player = ZSPlayer(
+        telegram_id=telegram_id,
+        name=name,
+        hp=hp_max,
+        hp_max=hp_max,
+        hunger=10,
+        day=1,
+        game_time=360,
+        player_class=player_class,
+        is_alive=True,
     )
-    return result.scalar_one_or_none()
-
-async def get_inventory(session: AsyncSession, telegram_id: int) -> ZSInventory | None:
-    result = await session.execute(
-        select(ZSInventory).where(ZSInventory.telegram_id == telegram_id)
-    )
-    return result.scalar_one_or_none()
-
-async def create_player(session: AsyncSession, telegram_id: int, name: str) -> ZSPlayer:
-    player = ZSPlayer(telegram_id=telegram_id, name=name)
-    base = ZSBase(telegram_id=telegram_id, buildings={}, defense_level=0)
+    session.add(player)
+    base = ZSBase(telegram_id=telegram_id)
+    session.add(base)
     inventory = ZSInventory(
         telegram_id=telegram_id,
         resources={"food": 5},
-        equipment=STARTER_EQUIPMENT.copy()
+        equipment={},
     )
-    session.add(player)
-    session.add(base)
     session.add(inventory)
     await session.commit()
-    await session.refresh(player)
     return player
 
-async def reset_player(session: AsyncSession, telegram_id: int):
+async def delete_player(session: AsyncSession, telegram_id: int):
     await session.execute(delete(ZSPlayer).where(ZSPlayer.telegram_id == telegram_id))
     await session.execute(delete(ZSBase).where(ZSBase.telegram_id == telegram_id))
     await session.execute(delete(ZSInventory).where(ZSInventory.telegram_id == telegram_id))
@@ -51,57 +55,45 @@ async def reset_player(session: AsyncSession, telegram_id: int):
     await session.execute(delete(ZSEvent).where(ZSEvent.telegram_id == telegram_id))
     await session.commit()
 
-# ─── ВРЕМЯ ───────────────────────────────────────────────────────────────────
+# ─── БАЗА ─────────────────────────────────────────────────────────────────────
 
-async def advance_time(session: AsyncSession, player: ZSPlayer, minutes: int):
-    player.game_time += minutes
-    if player.game_time >= 1440:
-        player.game_time -= 1440
-        player.day += 1
-        await process_new_day(session, player)
-    await session.commit()
+async def get_base(session: AsyncSession, telegram_id: int) -> ZSBase | None:
+    result = await session.execute(select(ZSBase).where(ZSBase.telegram_id == telegram_id))
+    return result.scalar_one_or_none()
 
-async def process_new_day(session: AsyncSession, player: ZSPlayer):
-    inventory = await get_inventory(session, player.telegram_id)
-    base = await get_base(session, player.telegram_id)
+async def get_max_npcs(base: ZSBase) -> int:
+    shelter_level = base.shelter or 0
+    if shelter_level == 0:
+        return 0
+    return BUILDINGS["shelter"]["levels"][shelter_level]["npc_slots"]
+
+async def upgrade_building(session: AsyncSession, base: ZSBase, inventory: ZSInventory, building: str) -> tuple[bool, str]:
+    current_level = getattr(base, building, 0)
+    if current_level >= 5:
+        return False, "Максимальный уровень!"
+    next_level = current_level + 1
+    cost = BUILDINGS[building]["levels"][next_level]["cost"]
     resources = dict(inventory.resources or {})
-    buildings = base.buildings or {}
 
-    # Огород — пассивная еда
-    garden_level = buildings.get("garden", 0)
-    if garden_level > 0:
-        food_bonus = [2, 5, 10][garden_level - 1]
-        resources["food"] = resources.get("food", 0) + food_bonus
+    # Проверяем ресурсы
+    for res, amount in cost.items():
+        if resources.get(res, 0) < amount:
+            res_name = RESOURCES[res]["name"]
+            return False, f"Недостаточно {res_name}: нужно {amount}, есть {resources.get(res, 0)}"
 
-    from sqlalchemy.orm.attributes import flag_modified
+    # Списываем ресурсы
+    for res, amount in cost.items():
+        resources[res] = resources.get(res, 0) - amount
     inventory.resources = resources
-    flag_modified(inventory, "resources")
+    setattr(base, building, next_level)
     await session.commit()
+    return True, f"✅ {BUILDINGS[building]['name']} улучшена до уровня {next_level}!"
 
-# ─── ГОЛОД ───────────────────────────────────────────────────────────────────
+# ─── ИНВЕНТАРЬ ────────────────────────────────────────────────────────────────
 
-async def reduce_hunger(session: AsyncSession, player: ZSPlayer, amount: int):
-    was_hungry = player.hunger == 0
-    player.hunger = max(0, player.hunger - amount)
-    if was_hungry:
-        player.hp = max(1, player.hp - 10)
-    await session.commit()
-
-async def eat_food(session: AsyncSession, player: ZSPlayer, inventory) -> bool:
-    resources = dict(inventory.resources or {})
-    if resources.get("food", 0) <= 0:
-        return False
-    resources["food"] -= 1
-    if resources["food"] == 0:
-        del resources["food"]
-    from sqlalchemy.orm.attributes import flag_modified
-    inventory.resources = resources
-    flag_modified(inventory, "resources")
-    player.hunger = min(10, player.hunger + 2)
-    await session.commit()
-    return True
-
-# ─── РЕСУРСЫ ─────────────────────────────────────────────────────────────────
+async def get_inventory(session: AsyncSession, telegram_id: int) -> ZSInventory | None:
+    result = await session.execute(select(ZSInventory).where(ZSInventory.telegram_id == telegram_id))
+    return result.scalar_one_or_none()
 
 async def add_resources(session: AsyncSession, inventory: ZSInventory, resources: dict):
     current = dict(inventory.resources or {})
@@ -110,149 +102,160 @@ async def add_resources(session: AsyncSession, inventory: ZSInventory, resources
     inventory.resources = current
     await session.commit()
 
-async def remove_resources(session: AsyncSession, inventory: ZSInventory, resources: dict) -> dict:
-    current = dict(inventory.resources or {})
-    for res, amount in resources.items():
-        if current.get(res, 0) < amount:
-            return {"success": False, "error": f"Недостаточно: {RESOURCES.get(res, {}).get('name', res)}"}
-        current[res] -= amount
-        if current[res] == 0:
-            del current[res]
-    inventory.resources = current
+async def get_player_defense(inventory: ZSInventory) -> int:
+    defense = 0
+    defense += EQUIPMENT["helmet"]["tiers"][inventory.helmet_tier or 0]["defense"]
+    defense += EQUIPMENT["armor"]["tiers"][inventory.armor_tier or 0]["defense"]
+    defense += EQUIPMENT["pants"]["tiers"][inventory.pants_tier or 0]["defense"]
+    defense += EQUIPMENT["boots"]["tiers"][inventory.boots_tier or 0]["defense"]
+    return defense
+
+async def get_player_melee_damage(inventory: ZSInventory, player: ZSPlayer) -> int:
+    base_damage = EQUIPMENT["melee"]["tiers"][inventory.melee_tier or 0]["damage"]
+    class_data = CLASSES.get(player.player_class or "soldier", CLASSES["soldier"])
+    return int(base_damage * class_data["damage_bonus"])
+
+async def get_player_ranged_damage(inventory: ZSInventory, player: ZSPlayer) -> int:
+    base_damage = EQUIPMENT["ranged"]["tiers"][inventory.ranged_tier or 0]["damage"]
+    class_data = CLASSES.get(player.player_class or "soldier", CLASSES["soldier"])
+    return int(base_damage * class_data["damage_bonus"])
+
+async def craft_equipment(session: AsyncSession, inventory: ZSInventory, player: ZSPlayer, base: ZSBase, slot: str, tier: int) -> tuple[bool, str]:
+    if tier < 1 or tier > 5:
+        return False, "Неверный тир!"
+    current_tier = getattr(inventory, f"{slot}_tier", 0)
+    if tier <= current_tier:
+        return False, "У тебя уже есть снаряжение этого или лучшего тира!"
+
+    # Проверяем мастерскую
+    class_data = CLASSES.get(player.player_class or "soldier", CLASSES["soldier"])
+    workshop_level = base.workshop or 0
+    required_workshop = tier
+    if class_data.get("can_craft_t3_without_workshop") and tier <= 3:
+        required_workshop = 0
+    if workshop_level < required_workshop:
+        return False, f"Нужна мастерская уровня {required_workshop}!"
+
+    tier_data = EQUIPMENT[slot]["tiers"][tier]
+    cost = dict(tier_data.get("craft", {}))
+
+    # Скидка для учёного
+    if class_data["craft_discount"] < 1.0:
+        cost = {res: max(1, int(amount * class_data["craft_discount"])) for res, amount in cost.items()}
+
+    resources = dict(inventory.resources or {})
+    for res, amount in cost.items():
+        if resources.get(res, 0) < amount:
+            res_name = RESOURCES[res]["name"]
+            return False, f"Недостаточно {res_name}: нужно {amount}, есть {resources.get(res, 0)}"
+
+    for res, amount in cost.items():
+        resources[res] = resources.get(res, 0) - amount
+    inventory.resources = resources
+    setattr(inventory, f"{slot}_tier", tier)
     await session.commit()
-    return {"success": True}
+    return True, f"✅ {EQUIPMENT[slot]['tiers'][tier]['name']} скрафтен!"
 
-# ─── ПОСТРОЙКИ ───────────────────────────────────────────────────────────────
+# ─── ГОЛОД ────────────────────────────────────────────────────────────────────
 
-async def build(session: AsyncSession, telegram_id: int, build_id: str) -> dict:
-    base = await get_base(session, telegram_id)
-    inventory = await get_inventory(session, telegram_id)
-    player = await get_player(session, telegram_id)
-    buildings = dict(base.buildings or {})
-
-    if build_id == "defense":
-        current_level = base.defense_level
-        if current_level >= len(DEFENSE_LEVELS) - 1:
-            return {"success": False, "error": "Защита уже максимального уровня."}
-        next_defense = DEFENSE_LEVELS[current_level + 1]
-        cost = next_defense["cost"]
-        time_cost = next_defense["time"]
-    elif build_id in BUILDINGS:
-        b_data = BUILDINGS[build_id]
-        current_level = buildings.get(build_id, 0)
-        if current_level >= len(b_data["levels"]):
-            return {"success": False, "error": "Постройка уже максимального уровня."}
-        next_level = b_data["levels"][current_level]
-        cost = next_level["cost"]
-        time_cost = next_level["time"]
-    else:
-        return {"success": False, "error": "Неизвестная постройка."}
-
-    result = await remove_resources(session, inventory, cost)
-    if not result.get("success"):
-        return result
-
-    if build_id == "defense":
-        base.defense_level += 1
-    else:
-        buildings[build_id] = buildings.get(build_id, 0) + 1
-        if build_id == "shelter":
-            level = buildings[build_id]
-            hp_bonus = BUILDINGS["shelter"]["levels"][level - 1]["hp_bonus"]
-            player.hp_max += hp_bonus
-        base.buildings = buildings
-
-    await advance_time(session, player, time_cost)
-    return {"success": True}
-
-async def upgrade_base(session: AsyncSession, telegram_id: int) -> dict:
-    base = await get_base(session, telegram_id)
-    inventory = await get_inventory(session, telegram_id)
-    player = await get_player(session, telegram_id)
-    next_level = base.level + 1
-
-    if next_level not in BASE_LEVELS:
-        return {"success": False, "error": "База уже максимального уровня."}
-
-    requirements = BASE_LEVELS[next_level]
-    buildings = base.buildings or {}
-
-    for build_id, required_level in requirements["requirements"].items():
-        if buildings.get(build_id, 0) < required_level:
-            build_name = BUILDINGS[build_id]["name"]
-            return {"success": False, "error": f"Нужно: {build_name} ур.{required_level}"}
-
-    result = await remove_resources(session, inventory, requirements["cost"])
-    if not result.get("success"):
-        return result
-
-    base.level = next_level
+async def reduce_hunger(session: AsyncSession, player: ZSPlayer, amount: int):
+    was_hungry = player.hunger == 0
+    class_data = CLASSES.get(player.player_class or "soldier", CLASSES["soldier"])
+    if class_data.get("slow_hunger"):
+        amount = max(1, amount - 1)
+    player.hunger = max(0, player.hunger - amount)
+    if was_hungry:
+        player.hp = max(1, player.hp - 10)
     await session.commit()
-    return {"success": True, "level": next_level}
 
-# ─── СНАРЯЖЕНИЕ ──────────────────────────────────────────────────────────────
-
-async def upgrade_equipment(session: AsyncSession, telegram_id: int, slot: str) -> dict:
-    from services.zs_data import EQUIPMENT_CHAINS, get_equipment_item
-    base = await get_base(session, telegram_id)
-    inventory = await get_inventory(session, telegram_id)
-    equipment = dict(inventory.equipment or {})
-    current_tier = equipment.get(slot, 0)
-    chain = EQUIPMENT_CHAINS.get(slot, [])
-
-    if current_tier + 1 >= len(chain):
-        return {"success": False, "error": "Снаряжение уже максимального уровня."}
-
-    next_item = chain[current_tier + 1]
-    craft_tier = next_item.get("craft_tier", 1)
-    workshop_tier = get_workshop_tier(base.buildings or {})
-
-    if craft_tier > workshop_tier:
-        return {"success": False, "error": "Нужна более продвинутая мастерская."}
-
-    result = await remove_resources(session, inventory, next_item.get("cost", {}))
-    if not result.get("success"):
-        return result
-
-    equipment[slot] = current_tier + 1
-    inventory.equipment = equipment
+async def eat_food(session: AsyncSession, player: ZSPlayer, inventory: ZSInventory) -> bool:
+    resources = dict(inventory.resources or {})
+    if resources.get("food", 0) <= 0:
+        return False
+    resources["food"] = resources["food"] - 1
+    inventory.resources = resources
+    player.hunger = min(10, player.hunger + 2)
     await session.commit()
-    return {"success": True, "item": next_item}
+    return True
 
-# ─── НПС ─────────────────────────────────────────────────────────────────────
+async def use_meds(session: AsyncSession, player: ZSPlayer, inventory: ZSInventory) -> bool:
+    resources = dict(inventory.resources or {})
+    if resources.get("meds", 0) <= 0:
+        return False
+    resources["meds"] = resources["meds"] - 1
+    inventory.resources = resources
+    class_data = CLASSES.get(player.player_class or "soldier", CLASSES["soldier"])
+    heal = int(20 * class_data["med_bonus"])
+    player.hp = min(player.hp_max, player.hp + heal)
+    await session.commit()
+    return True
 
-async def get_npcs(session: AsyncSession, telegram_id: int) -> list[ZSNPC]:
+# ─── СОБЫТИЯ ──────────────────────────────────────────────────────────────────
+
+async def add_event(session: AsyncSession, telegram_id: int, day: int, event_type: str, text: str):
+    event = ZSEvent(telegram_id=telegram_id, day=day, event_type=event_type, event_text=text)
+    session.add(event)
+    # Удаляем события старше 3 дней
+    old_day = day - 3
+    if old_day > 0:
+        await session.execute(delete(ZSEvent).where(
+            ZSEvent.telegram_id == telegram_id,
+            ZSEvent.day < old_day
+        ))
+    await session.commit()
+
+async def get_events(session: AsyncSession, telegram_id: int, days: int = 3) -> list:
+    result = await session.execute(
+        select(ZSEvent).where(ZSEvent.telegram_id == telegram_id)
+        .order_by(ZSEvent.created_at.desc()).limit(20)
+    )
+    return result.scalars().all()
+
+# ─── НПС ──────────────────────────────────────────────────────────────────────
+
+async def get_npcs(session: AsyncSession, telegram_id: int) -> list:
     result = await session.execute(
         select(ZSNPC).where(ZSNPC.telegram_id == telegram_id, ZSNPC.is_alive == True)
     )
     return result.scalars().all()
 
-async def add_npc(session: AsyncSession, telegram_id: int) -> ZSNPC | None:
-    base = await get_base(session, telegram_id)
-    npcs = await get_npcs(session, telegram_id)
-    max_npcs = get_max_npcs(base.level)
-
-    if len(npcs) >= max_npcs:
-        return None
-
+async def create_npc(session: AsyncSession, telegram_id: int) -> ZSNPC:
     name = random.choice(NPC_NAMES)
-    npc = ZSNPC(telegram_id=telegram_id, name=name)
+    npc = ZSNPC(
+        telegram_id=telegram_id,
+        name=name,
+        status="idle",
+        level=1,
+        exp=0,
+        hp=50,
+        hp_max=50,
+        hunger=10,
+        weapon_tier=0,
+        armor_tier=0,
+        is_alive=True,
+    )
     session.add(npc)
     await session.commit()
     return npc
 
-async def send_npc_on_mission(session: AsyncSession, npc_id: int, location: str) -> dict:
-    result = await session.execute(select(ZSNPC).where(ZSNPC.id == npc_id))
-    npc = result.scalar_one_or_none()
-    if not npc:
-        return {"success": False, "error": "НПС не найден."}
-    npc.status = "mission"
-    npc.location = location
+async def feed_npc(session: AsyncSession, npc: ZSNPC, inventory: ZSInventory) -> bool:
+    resources = dict(inventory.resources or {})
+    if resources.get("food", 0) <= 0:
+        return False
+    resources["food"] = resources["food"] - 1
+    inventory.resources = resources
+    npc.hunger = min(10, npc.hunger + 2)
     await session.commit()
-    return {"success": True}
+    return True
 
-async def return_npcs(session: AsyncSession, player: ZSPlayer):
-    from services.zs_data import LOCATIONS, get_npc_level_data, get_npc_exp_needed
+async def send_npc_on_mission(session: AsyncSession, npc: ZSNPC, location_id: str):
+    npc.status = "mission"
+    npc.location = location_id
+    loc = LOCATIONS[location_id]
+    npc.hunger = max(0, npc.hunger - loc["tier"])
+    await session.commit()
+
+async def return_npcs(session: AsyncSession, player: ZSPlayer) -> dict:
     result = await session.execute(
         select(ZSNPC).where(
             ZSNPC.telegram_id == player.telegram_id,
@@ -267,122 +270,234 @@ async def return_npcs(session: AsyncSession, player: ZSPlayer):
 
     for npc in npcs:
         loc = LOCATIONS.get(npc.location, {})
+        tier = loc.get("tier", 1)
         level_data = get_npc_level_data(npc.level)
-        death_chance = level_data["death_chance"]
         loot_bonus = level_data["loot_bonus"]
 
         npc.missions_total = (npc.missions_total or 0) + 1
 
-        if random.randint(1, 100) <= death_chance:
+        # Бой НПС с зомби
+        zombie_hp_range = loc.get("zombie_hp", (25, 40))
+        zombie_damage_range = loc.get("zombie_damage", (8, 15))
+        zombie_hp = random.randint(*zombie_hp_range)
+        zombie_damage = random.randint(*zombie_damage_range)
+
+        npc_weapon_damage = EQUIPMENT["melee"]["tiers"][npc.weapon_tier or 0]["damage"]
+        npc_armor_defense = EQUIPMENT["armor"]["tiers"][npc.armor_tier or 0]["defense"]
+
+        npc_hp = npc.hp
+        rounds = 0
+        survived = True
+        while zombie_hp > 0 and npc_hp > 0 and rounds < 20:
+            zombie_hp -= npc_weapon_damage
+            if zombie_hp > 0:
+                damage = max(1, zombie_damage - npc_armor_defense)
+                npc_hp -= damage
+            rounds += 1
+
+        if npc_hp <= 0:
             npc.is_alive = False
             died.append(npc.name)
-        else:
-            npc.missions_survived = (npc.missions_survived or 0) + 1
-            npc.exp = (npc.exp or 0) + 1
-            leveled_up = False
-            if npc.level < 5 and npc.exp >= get_npc_exp_needed(npc.level):
-                npc.level += 1
-                npc.exp = 0
-                leveled_up = True
+            continue
 
-            resources = {}
-            for res_id, res_data in loc.get("resources", {}).items():
-                if random.randint(1, 100) <= res_data["chance"] // 2:
-                    amount = int(random.randint(1, res_data["max"] // 2 + 1) * loot_bonus)
-                    if amount > 0:
-                        resources[res_id] = amount
-            if resources:
-                await add_resources(session, inventory, resources)
-            npc.status = "idle"
-            npc.location = None
-            returned.append({"name": npc.name, "resources": resources, "leveled_up": leveled_up, "level": npc.level})
+        npc.hp = min(npc.hp_max, npc_hp)
+        npc.missions_survived = (npc.missions_survived or 0) + 1
+        npc.exp = (npc.exp or 0) + 1
+        leveled_up = False
+        if npc.level < 5 and npc.exp >= get_npc_exp_needed(npc.level):
+            npc.level += 1
+            npc.exp = 0
+            leveled_up = True
+            level_data = get_npc_level_data(npc.level)
+            npc.hp_max = level_data["hp"]
+            npc.hp = npc.hp_max
+
+        # Лут
+        resources = {}
+        for res_id, res_data in loc.get("resources", {}).items():
+            if random.randint(1, 100) <= res_data["chance"] // 2:
+                amount = int(random.randint(1, res_data["max"] // 2 + 1) * loot_bonus)
+                if amount > 0:
+                    resources[res_id] = amount
+
+        if resources and inventory:
+            await add_resources(session, inventory, resources)
+
+        npc.status = "idle"
+        npc.location = None
+        returned.append({
+            "name": npc.name,
+            "resources": resources,
+            "leveled_up": leveled_up,
+            "level": npc.level
+        })
 
     await session.commit()
     return {"returned": returned, "died": died}
 
-# ─── НОЧНОЕ НАПАДЕНИЕ ────────────────────────────────────────────────────────
+# ─── ВЫЛАЗКА ──────────────────────────────────────────────────────────────────
 
-async def night_attack(session: AsyncSession, player: ZSPlayer) -> dict:
-    base = await get_base(session, player.telegram_id)
-    inventory = await get_inventory(session, player.telegram_id)
-    npcs = await get_npcs(session, player.telegram_id)
-
-    npc_count = len(npcs)
-    base_damage = 20 + (player.day * 2) + (npc_count * 5)
-    defense = DEFENSE_LEVELS[base.defense_level]["damage_reduction"]
-    actual_damage = max(5, int(base_damage * (1 - defense / 100)))
-
-    from services.zs_data import get_total_defense
-    equip_defense = get_total_defense(inventory.equipment or {})
-    actual_damage = max(5, actual_damage - equip_defense // 10)
-
-    player.hp = max(0, player.hp - actual_damage)
-
-    lost_npcs = []
-    lost_resources = {}
-
-    if actual_damage > base_damage * 0.7:
-        idle_npcs = [n for n in npcs if n.status == "idle"]
-        if idle_npcs:
-            for npc in idle_npcs:
-                if random.randint(1, 100) <= 15:
-                    npc.is_alive = False
-                    lost_npcs.append(npc.name)
-
-        resources = dict(inventory.resources or {})
-        for res_id in list(resources.keys()):
-            if random.randint(1, 100) <= 20:
-                loss = int(resources[res_id] * random.uniform(0.1, 0.2))
-                if loss > 0:
-                    resources[res_id] = max(0, resources[res_id] - loss)
-                    lost_resources[res_id] = loss
-        inventory.resources = resources
-
-    if player.hp <= 0:
-        player.is_alive = False
-
-    await session.commit()
-    return {
-        "damage": actual_damage,
-        "lost_npcs": lost_npcs,
-        "lost_resources": lost_resources,
-        "survived": player.hp > 0,
-    }
-
-# ─── СОБЫТИЯ ─────────────────────────────────────────────────────────────────
-
-async def add_event(session: AsyncSession, telegram_id: int, day: int, event_type: str, text: str):
-    from models.zombie_survival import ZSEvent
-    event = ZSEvent(telegram_id=telegram_id, day=day, event_type=event_type, event_text=text)
-    session.add(event)
-    await session.commit()
-
-async def get_events(session: AsyncSession, telegram_id: int, current_day: int) -> list:
-    from models.zombie_survival import ZSEvent
-    from sqlalchemy import select
-    min_day = max(1, current_day - 2)
+async def get_random_scenario(session: AsyncSession, location_id: str) -> dict | None:
+    from sqlalchemy import text
     result = await session.execute(
-        select(ZSEvent)
-        .where(ZSEvent.telegram_id == telegram_id, ZSEvent.day >= min_day)
-        .order_by(ZSEvent.day.desc(), ZSEvent.created_at.desc())
+        text("SELECT id, intro_text FROM zs_location_scenarios WHERE location_id = :loc ORDER BY RANDOM() LIMIT 1"),
+        {"loc": location_id}
     )
-    return result.scalars().all()
-
-# ─── ИЗОБРАЖЕНИЯ ─────────────────────────────────────────────────────────────
-
-async def get_image(session: AsyncSession, key: str) -> ZSImage | None:
-    result = await session.execute(
-        select(ZSImage).where(ZSImage.key == key)
+    row = result.fetchone()
+    if not row:
+        return None
+    scenario_id, intro_text = row
+    opts = await session.execute(
+        text("SELECT option_type, button_text, action_text, result_type FROM zs_scenario_options WHERE scenario_id = :sid"),
+        {"sid": scenario_id}
     )
-    return result.scalar_one_or_none()
+    options = [{"type": r[0], "button": r[1], "text": r[2], "result": r[3]} for r in opts.fetchall()]
+    return {"intro": intro_text, "options": options}
 
-async def set_image(session: AsyncSession, key: str, file_id: str, added_by: int) -> ZSImage:
-    existing = await get_image(session, key)
-    if existing:
-        existing.file_id = file_id
+async def start_raid(session: AsyncSession, player: ZSPlayer, inventory: ZSInventory, location_id: str) -> dict:
+    loc = LOCATIONS[location_id]
+    tier = loc["tier"]
+    await reduce_hunger(session, player, tier)
+    scenario = await get_random_scenario(session, location_id)
+    return {"scenario": scenario, "location": loc, "location_id": location_id}
+
+async def process_raid_option(session: AsyncSession, player: ZSPlayer, inventory: ZSInventory, base: ZSBase, location_id: str, option: dict) -> dict:
+    loc = LOCATIONS[location_id]
+    tier = loc["tier"]
+    result_type = option["result"]
+    class_data = CLASSES.get(player.player_class or "soldier", CLASSES["soldier"])
+
+    if result_type == "leave":
+        player.hunger = min(10, player.hunger + 1)
         await session.commit()
-        return existing
-    image = ZSImage(key=key, file_id=file_id, added_by=added_by)
-    session.add(image)
+        return {"type": "leave", "text": option["text"]}
+
+    if result_type == "npc":
+        # Проверяем место на базе
+        npcs = await get_npcs(session, player.telegram_id)
+        max_npcs = await get_max_npcs(base)
+        has_space = len(npcs) < max_npcs
+
+        loot_chances = {1: 70, 2: 55, 3: 40}
+        loot_chance = loot_chances.get(tier, 70)
+        give_loot = random.randint(1, 100) <= loot_chance
+
+        resources = {}
+        if give_loot or not has_space:
+            if give_loot:
+                for res_id, res_data in loc["resources"].items():
+                    if random.randint(1, 100) <= res_data["chance"] // 2:
+                        amount = random.randint(1, res_data["max"] // 2 + 1)
+                        if amount > 0:
+                            resources[res_id] = amount
+                if resources:
+                    await add_resources(session, inventory, resources)
+
+        npc = None
+        if has_space:
+            npc = await create_npc(session, player.telegram_id)
+
+        return {"type": "npc", "text": option["text"], "npc": npc, "resources": resources, "has_space": has_space}
+
+    if result_type == "fight":
+        zombie_hp = random.randint(*loc["zombie_hp"])
+        zombie_damage = random.randint(*loc["zombie_damage"])
+        return {
+            "type": "fight",
+            "text": option["text"],
+            "zombie_hp": zombie_hp,
+            "zombie_damage": zombie_damage,
+            "zombie_hp_max": zombie_hp,
+            "location_id": location_id,
+            "is_combat_loot": True,
+        }
+
+    if result_type == "loot":
+        fight_chances = {1: 20, 2: 30, 3: 40}
+        fight_chance = fight_chances.get(tier, 20)
+
+        roll = random.randint(1, 100)
+        if roll <= fight_chance:
+            zombie_hp = random.randint(*loc["zombie_hp"])
+            zombie_damage = random.randint(*loc["zombie_damage"])
+            return {
+                "type": "fight",
+                "text": "Ты ищешь лут но натыкаешься на зомби!",
+                "zombie_hp": zombie_hp,
+                "zombie_damage": zombie_damage,
+                "zombie_hp_max": zombie_hp,
+                "location_id": location_id,
+                "is_combat_loot": True,
+            }
+        else:
+            resources = {}
+            loot_bonus = class_data["loot_bonus"]
+            for res_id, res_data in loc["resources"].items():
+                if random.randint(1, 100) <= res_data["chance"]:
+                    amount = int(random.randint(1, res_data["max"]) * loot_bonus)
+                    if amount > 0:
+                        resources[res_id] = amount
+            if resources:
+                await add_resources(session, inventory, resources)
+            return {"type": "loot", "text": option["text"], "resources": resources}
+
+    return {"type": "empty", "text": option["text"]}
+
+async def process_combat_victory(session: AsyncSession, player: ZSPlayer, inventory: ZSInventory, location_id: str, is_combat_loot: bool = False) -> dict:
+    loc = LOCATIONS[location_id]
+    class_data = CLASSES.get(player.player_class or "soldier", CLASSES["soldier"])
+    resources = {}
+    loot_bonus = class_data["loot_bonus"] * (1.3 if is_combat_loot else 1.0)
+    for res_id, res_data in loc["resources"].items():
+        if random.randint(1, 100) <= res_data["chance"]:
+            amount = int(random.randint(1, res_data["max"]) * loot_bonus)
+            if amount > 0:
+                resources[res_id] = amount
+    if resources:
+        await add_resources(session, inventory, resources)
+    return resources
+
+# ─── НОЧЬ ─────────────────────────────────────────────────────────────────────
+
+async def process_night(session: AsyncSession, player: ZSPlayer, base: ZSBase, inventory: ZSInventory) -> dict:
+    result = {}
+
+    # Огород
+    garden_level = base.garden or 0
+    if garden_level > 0:
+        food_amount = BUILDINGS["garden"]["levels"][garden_level]["food_per_day"]
+        await add_resources(session, inventory, {"food": food_amount})
+        result["garden_food"] = food_amount
+
+    # Медпункт
+    medpost_level = base.medpost or 0
+    if medpost_level > 0:
+        heal = BUILDINGS["medpost"]["levels"][medpost_level]["heal_per_day"]
+        class_data = CLASSES.get(player.player_class or "soldier", CLASSES["soldier"])
+        heal = int(heal * class_data["med_bonus"])
+        old_hp = player.hp
+        player.hp = min(player.hp_max, player.hp + heal)
+        result["medpost_heal"] = player.hp - old_hp
+
+    # Голод
+    await reduce_hunger(session, player, 1)
+
+    # Новый день
+    player.day += 1
+    player.game_time = 360
     await session.commit()
-    return image
+
+    # Нападение орды
+    attacked = random.randint(1, 100) <= NIGHT_ATTACK_CHANCE
+    if attacked:
+        horde_stats = get_horde_stats(player.day - 1)
+        zombie_hp = random.randint(*horde_stats["hp"])
+        zombie_damage = random.randint(*horde_stats["damage"])
+        result["attacked"] = True
+        result["zombie_hp"] = zombie_hp
+        result["zombie_damage"] = zombie_damage
+        result["zombie_hp_max"] = zombie_hp
+    else:
+        result["attacked"] = False
+
+    return result

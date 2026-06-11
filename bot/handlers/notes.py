@@ -289,10 +289,14 @@ async def cb_edit_note(callback: CallbackQuery, state: FSMContext, user: User, s
         await callback.message.delete()
     except Exception:
         pass
+    skip_buttons = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⏭ Пропустить", callback_data="note_edit_skip_title")]
+    ])
     msg = await callback.message.answer(
         f"✏️ Редактирование: '{note.title}'\n\n"
         f"Текущий заголовок:\n{note.title}\n\n"
-        f"Введи новый заголовок или /skip чтобы оставить:"
+        f"Введи новый заголовок:",
+        reply_markup=skip_buttons
     )
     await state.update_data(prompt_msg_id=msg.message_id)
     await state.set_state(NoteStates.editing_title)
@@ -310,11 +314,14 @@ async def process_edit_title(message: Message, state: FSMContext, session: Async
         except Exception:
             pass
     note = await get_note(session, data["note_id"])
-    if message.text != "/skip":
-        await state.update_data(new_title=message.text)
+    await state.update_data(new_title=message.text)
+    skip_buttons = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⏭ Пропустить", callback_data="note_edit_skip_content")]
+    ])
     msg = await message.answer(
         f"Текущий текст заметки:\n\n{note.content}\n\n"
-        f"Введи новый текст или /skip чтобы оставить:"
+        f"Введи новый текст:",
+        reply_markup=skip_buttons
     )
     await state.update_data(prompt_msg_id=msg.message_id)
     await state.set_state(NoteStates.editing_content)
@@ -331,8 +338,7 @@ async def process_edit_content(message: Message, state: FSMContext, session: Asy
             await message.bot.delete_message(message.chat.id, data["prompt_msg_id"])
         except Exception:
             pass
-    if message.text != "/skip":
-        await state.update_data(new_content=message.text)
+    await state.update_data(new_content=message.text)
     data = await state.get_data()
     note = await get_note(session, data["note_id"])
     has_image = "есть 🖼" if note.image_file_id else "нет"
@@ -345,6 +351,48 @@ async def process_edit_content(message: Message, state: FSMContext, session: Asy
         f"🖼 Изображение: {has_image}\n\nЧто сделать с изображением?",
         reply_markup=buttons
     )
+    await state.set_state(NoteStates.editing_image)
+
+@router.callback_query(F.data == "note_edit_skip_title")
+async def cb_edit_skip_title(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
+    data = await state.get_data()
+    note = await get_note(session, data["note_id"])
+    if data.get("prompt_msg_id"):
+        try:
+            await callback.bot.delete_message(callback.message.chat.id, data["prompt_msg_id"])
+        except Exception:
+            pass
+    skip_buttons = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⏭ Пропустить", callback_data="note_edit_skip_content")]
+    ])
+    msg = await callback.message.answer(
+        f"Текущий текст заметки:\n\n{note.content}\n\n"
+        f"Введи новый текст:",
+        reply_markup=skip_buttons
+    )
+    await state.update_data(prompt_msg_id=msg.message_id)
+    await state.set_state(NoteStates.editing_content)
+
+@router.callback_query(F.data == "note_edit_skip_content")
+async def cb_edit_skip_content(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
+    data = await state.get_data()
+    note = await get_note(session, data["note_id"])
+    if data.get("prompt_msg_id"):
+        try:
+            await callback.bot.delete_message(callback.message.chat.id, data["prompt_msg_id"])
+        except Exception:
+            pass
+    has_image = "есть 🖼" if note.image_file_id else "нет"
+    buttons = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🖼 Загрузить новое", callback_data="note_edit_upload_image")],
+        *([[InlineKeyboardButton(text="🗑 Удалить изображение", callback_data="note_edit_remove_image")]] if note.image_file_id else []),
+        [InlineKeyboardButton(text="⏭ Оставить как есть", callback_data="note_edit_keep_image")],
+    ])
+    msg = await callback.message.answer(
+        f"🖼 Изображение: {has_image}\n\nЧто сделать с изображением?",
+        reply_markup=buttons
+    )
+    await state.update_data(prompt_msg_id=msg.message_id)
     await state.set_state(NoteStates.editing_image)
 
 @router.callback_query(F.data == "note_edit_upload_image")
