@@ -23,7 +23,6 @@ def main_menu(user: User) -> InlineKeyboardMarkup:
     if user.role in ["owner", "admin", "user"]:
         buttons.append([InlineKeyboardButton(text="📒 Заметки", callback_data="menu_notes")])
         buttons.append([InlineKeyboardButton(text="🎬 Медиатека", callback_data="menu_media")])
-        buttons.append([InlineKeyboardButton(text="🧟 Выжить", callback_data="menu_zs")])
     if user.role in ["admin", "owner"]:
         buttons.append([InlineKeyboardButton(text="🐳 Docker", callback_data="menu_docker")])
         buttons.append([InlineKeyboardButton(text="🌊 Торренты", callback_data="menu_torrents")])
@@ -150,10 +149,6 @@ async def cb_menu_minidlna(callback: CallbackQuery, user: User):
     from handlers.minidlna import show_minidlna
     await show_minidlna(callback, user)
 
-@router.callback_query(F.data == "menu_zs")
-async def cb_menu_zs(callback: CallbackQuery, user: User, session: AsyncSession, state: FSMContext):
-    from handlers.zs_game import cb_zs_menu
-    await cb_zs_menu(callback, user, session)
 
 @router.callback_query(F.data == "menu_users")
 async def cb_menu_users(callback: CallbackQuery, user: User):
