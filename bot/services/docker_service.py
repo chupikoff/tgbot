@@ -3,36 +3,30 @@ import docker
 
 logger = logging.getLogger(__name__)
 
-def get_docker_client():
-    return docker.from_env()
 
 def get_containers() -> list:
-    try:
-        client = get_docker_client()
-        containers = client.containers.list(all=True)
-        result = []
-        for c in containers:
-            result.append({
-                "id": c.short_id,
-                "name": c.name,
-                "status": c.status,
-                "image": c.image.tags[0] if c.image.tags else "unknown",
-            })
-        return result
-    except Exception as e:
-        logger.error(f"Docker error: {e}")
-        raise
+    client = docker.from_env()
+    result = []
+    for c in client.containers.list(all=True):
+        result.append({
+            "id": c.short_id,
+            "name": c.name,
+            "status": c.status,
+            "image": c.image.tags[0] if c.image.tags else "unknown",
+        })
+    return result
 
-def get_container_info(container_name: str) -> dict | None:
+
+def get_container_info(name: str) -> dict | None:
     try:
-        client = get_docker_client()
-        container = client.containers.get(container_name)
+        client = docker.from_env()
+        c = client.containers.get(name)
         cpu_percent = 0.0
         mem_mb = 0.0
         mem_percent = 0.0
 
-        if container.status == "running":
-            stats = container.stats(stream=False)
+        if c.status == "running":
+            stats = c.stats(stream=False)
             cpu_delta = stats["cpu_stats"]["cpu_usage"]["total_usage"] - stats["precpu_stats"]["cpu_usage"]["total_usage"]
             system_delta = stats["cpu_stats"].get("system_cpu_usage", 0) - stats["precpu_stats"].get("system_cpu_usage", 0)
             cpu_percent = round((cpu_delta / system_delta) * 100, 1) if system_delta > 0 else 0.0
@@ -42,31 +36,31 @@ def get_container_info(container_name: str) -> dict | None:
             mem_mb = round(mem_usage / 1024 / 1024, 1)
 
         return {
-            "id": container.short_id,
-            "name": container.name,
-            "status": container.status,
-            "image": container.image.tags[0] if container.image.tags else "unknown",
+            "name": c.name,
+            "status": c.status,
+            "image": c.image.tags[0] if c.image.tags else "unknown",
             "cpu_percent": cpu_percent,
             "mem_mb": mem_mb,
             "mem_percent": mem_percent,
         }
     except Exception as e:
-        logger.error(f"Docker container info error: {e}")
+        logger.error(f"Container info error: {e}")
         return None
 
-def container_action(container_name: str, action: str) -> dict:
+
+def container_action(name: str, action: str) -> bool:
     try:
-        client = get_docker_client()
-        container = client.containers.get(container_name)
+        client = docker.from_env()
+        c = client.containers.get(name)
         if action == "start":
-            container.start()
+            c.start()
         elif action == "stop":
-            container.stop()
+            c.stop()
         elif action == "restart":
-            container.restart()
+            c.restart()
         elif action == "remove":
-            container.remove(force=True)
-        return {"success": True}
+            c.remove(force=True)
+        return True
     except Exception as e:
-        logger.error(f"Docker action error: {e}")
-        return {"success": False, "error": str(e)}
+        logger.error(f"Container action error: {e}")
+        return False

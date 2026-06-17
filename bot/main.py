@@ -7,8 +7,10 @@ from handlers import router
 from middlewares.auth import AuthMiddleware
 from db.database import init_db, async_session
 from workers.backup_worker import schedule_backups
+from workers.reminder_worker import check_reminders
 
 logging.basicConfig(level=logging.INFO)
+
 
 async def main():
     await init_db()
@@ -22,10 +24,16 @@ async def main():
 
     dp.include_router(router)
 
-    asyncio.create_task(schedule_backups(bot))
-
     await bot.delete_webhook(drop_pending_updates=True)
+
+    async def on_startup():
+        asyncio.create_task(schedule_backups(bot))
+        asyncio.create_task(check_reminders(bot))
+        logging.info("Workers started.")
+
+    dp.startup.register(on_startup)
     await dp.start_polling(bot)
+
 
 if __name__ == "__main__":
     asyncio.run(main())

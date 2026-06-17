@@ -1,52 +1,56 @@
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from models.user import User
-from datetime import datetime
+
+ROLE_LEVELS = {
+    "guest": 0,
+    "user": 1,
+    "admin": 2,
+    "owner": 3,
+}
+
 
 async def get_user(session: AsyncSession, telegram_id: int) -> User | None:
-    result = await session.execute(
-        select(User).where(User.telegram_id == telegram_id)
-    )
+    result = await session.execute(select(User).where(User.telegram_id == telegram_id))
     return result.scalar_one_or_none()
 
-async def create_user(session: AsyncSession, telegram_id: int, username: str | None, full_name: str | None, role: str = "guest") -> User:
-    user = User(
-        telegram_id=telegram_id,
-        username=username,
-        full_name=full_name,
-        role=role
-    )
-    session.add(user)
-    await session.commit()
-    await session.refresh(user)
-    return user
-
-async def get_or_create_user(session: AsyncSession, telegram_id: int, username: str | None, full_name: str | None, is_owner: bool = False) -> User:
-    user = await get_user(session, telegram_id)
-    if not user:
-        role = "owner" if is_owner else "guest"
-        user = await create_user(session, telegram_id, username, full_name, role)
-    else:
-        user.last_seen = datetime.utcnow()
-        user.username = username
-        user.full_name = full_name
-        await session.commit()
-    return user
 
 async def get_all_users(session: AsyncSession) -> list[User]:
-    result = await session.execute(select(User))
+    result = await session.execute(select(User).order_by(User.created_at))
     return result.scalars().all()
 
-async def set_user_role(session: AsyncSession, telegram_id: int, role: str) -> User | None:
-    user = await get_user(session, telegram_id)
-    if user:
-        user.role = role
-        await session.commit()
-    return user
 
-async def set_user_active(session: AsyncSession, telegram_id: int, is_active: bool) -> User | None:
-    user = await get_user(session, telegram_id)
-    if user:
-        user.is_active = is_active
-        await session.commit()
-    return user
+async def set_role(session: AsyncSession, target: User, new_role: str, actor: User) -> bool:
+    actor_level = ROLE_LEVELS.get(actor.role, 0)
+    target_level = ROLE_LEVELS.get(target.role, 0)
+    new_level = ROLE_LEVELS.get(new_role, 0)
+
+    # Owner неприкосновенен
+    if target.role == "owner":
+        return False
+
+    # Admin не может трогать других Admin
+    if actor.role == "admin" and target_level >= ROLE_LEVELS["admin"]:
+        return False
+
+    # Admin может назначать только user и guest
+    if actor.role == "admin" and new_level >= ROLE_LEVELS["admin"]:
+        return False
+
+    target.role = new_role
+    await session.commit()
+    return True
+
+
+async def set_active(session: AsyncSession, target: User, is_active: bool, actor: User) -> bool:
+    # Owner неприкосновенен
+    if target.role == "owner":
+        return False
+
+    # Admin не может трогать других Admin
+    if actor.role == "admin" and target.role == "admin":
+        return False
+
+    target.is_active = is_active
+    await session.commit()
+    return True

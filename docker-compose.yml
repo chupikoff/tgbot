@@ -3,6 +3,8 @@ services:
     build: .
     restart: unless-stopped
     env_file: .env
+    environment:
+      - TZ=Europe/Kyiv
     privileged: true
     volumes:
       - /home/chpk/backups:/home/chpk/backups

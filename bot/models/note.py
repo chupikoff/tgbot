@@ -3,6 +3,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from datetime import datetime
 from models.user import Base
 
+
 class Category(Base):
     __tablename__ = "categories"
 
@@ -13,6 +14,7 @@ class Category(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
     notes: Mapped[list["Note"]] = relationship("Note", back_populates="category")
+
 
 class Note(Base):
     __tablename__ = "notes"
