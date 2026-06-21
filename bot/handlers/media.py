@@ -175,25 +175,22 @@ async def process_media_video(message: Message, state: FSMContext, user: User, s
         await message.bot.delete_message(message.chat.id, data["prompt_id"])
     except Exception:
         pass
-
-    status_msg = await message.answer("⏳ Сохраняю видео...")
-    file = await message.bot.get_file(message.video.file_id)
-    filename = f"{data['title'].replace(' ', '_')}.mp4"
-    file_path = os.path.join(settings.MEDIA_DIR, filename)
-    await message.bot.download_file(file.file_path, destination=file_path)
-
     try:
         await message.delete()
     except Exception:
         pass
 
-    media = await create_media(
-        session, data["title"], user.telegram_id,
-        file_id=message.video.file_id,
-        file_path=file_path,
-    )
-    await state.clear()
-    await status_msg.edit_text(f"✅ Видео '{media.title}' сохранено!", reply_markup=back_button("media_list_0"))
+    file_id = message.video.file_id
+    await state.update_data(file_id=file_id, file_type="video")
+
+    categories = await get_categories(session)
+    buttons = []
+    for cat in categories:
+        buttons.append([InlineKeyboardButton(text=f"📂 {cat.name}", callback_data=f"media_setcat_{cat.id}")])
+    buttons.append([InlineKeyboardButton(text="➕ Новая категория", callback_data="media_newcat")])
+    buttons.append([InlineKeyboardButton(text="⏭ Без категории", callback_data="media_setcat_0")])
+
+    await message.answer("📂 Выбери категорию:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
 
 
 @router.callback_query(F.data == "media_rescan")
@@ -379,3 +376,25 @@ async def process_rename(message: Message, state: FSMContext, user: User, sessio
 
     await save_display_name(session, file_info["path"], message.text, user.telegram_id)
     await message.answer(f"✅ Название сохранено: {message.text}", reply_markup=back_button("media_library_0"))
+
+@router.callback_query(F.data.startswith("media_setcat_"))
+async def cb_media_setcat_video(callback: CallbackQuery, state: FSMContext, user: User, session: AsyncSession):
+    cat_id_str = callback.data.replace("media_setcat_", "")
+    cat_id = int(cat_id_str) if cat_id_str != "0" else None
+    data = await state.get_data()
+    file_id = data.get("file_id")
+    title = data.get("title")
+    if not file_id or not title:
+        await callback.answer("❌ Данные потеряны, начни заново.")
+        await state.clear()
+        return
+    await state.clear()
+    media = await create_media(
+        session, title, user.telegram_id,
+        file_id=file_id,
+        category_id=cat_id,
+    )
+    await callback.message.edit_text(
+        f"✅ Видео '{media.title}' добавлено!",
+        reply_markup=back_button("media_list_0")
+    )
